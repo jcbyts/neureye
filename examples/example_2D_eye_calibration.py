@@ -1,6 +1,7 @@
 #%% 
 import sys
-sys.path.insert(0, '/home/jake/Repos/')
+# sys.path.insert(0, '/home/jake/Repos/')
+sys.path.insert(0, '/home/jake/Data/Repos/')
 
 import os
 
@@ -26,7 +27,8 @@ stimlist=["Gabor", "Dots", "BackImage"] #, "Grating", "FixRsvpStim"] # use all a
 lengthscale=1
 num_lags = 12
 sessid = '20200304_kilowf' # '20200304_kilowf'
-data_path='/home/jake/Datasets/Mitchell/stim_movies/'
+# data_path='/home/jake/Datasets/Mitchell/stim_movies/'
+data_path='/home/jake/Data/Datasets/MitchellV1FreeViewing/stim_movies/'
 
 save_dir='./checkpoints/v1calibration_ls{}'.format(lengthscale)
 figDir = "./Figures/"
@@ -146,95 +148,97 @@ sample = gd[:2000]
 Fit single layer DivNorm model with modulation
 """
 
-version = 1
+for version in range(10):
 
-#% Model: convolutional model
-input_channels = gd.num_lags
-hidden_channels = 16
-input_kern = 19
-hidden_kern = 5
-core = cores.Stacked2dDivNorm(input_channels,
-        hidden_channels,
-        input_kern,
-        hidden_kern,
-        layers=1,
-        gamma_hidden=1e-6, # group sparsity
-        gamma_input=1,
-        gamma_center=0,
-        skip=0,
-        final_nonlinearity=True,
-        bias=False,
-        pad_input=True,
-        hidden_padding=hidden_kern//2,
-        group_norm=True,
-        num_groups=4,
-        weight_norm=True,
-        hidden_dilation=1,
-        input_regularizer="RegMats",
-        input_reg_types=["d2x", "center", "d2t"],
-        input_reg_amt=[.000005, .01, 0.00001],
-        hidden_reg_types=["d2x", "center"],
-        hidden_reg_amt=[.000005, .01],
-        stack=None,
-        use_avg_reg=True)
+    #% Model: convolutional model
+    input_channels = gd.num_lags
+    hidden_channels = 16
+    input_kern = 19
+    hidden_kern = 5
+    core = cores.Stacked2dDivNorm(input_channels,
+            hidden_channels,
+            input_kern,
+            hidden_kern,
+            layers=1,
+            gamma_hidden=1e-6, # group sparsity
+            gamma_input=1,
+            gamma_center=0,
+            skip=0,
+            final_nonlinearity=True,
+            bias=False,
+            pad_input=True,
+            hidden_padding=hidden_kern//2,
+            group_norm=True,
+            num_groups=4,
+            weight_norm=True,
+            hidden_dilation=1,
+            input_regularizer="RegMats",
+            input_reg_types=["d2x", "center", "d2t"],
+            input_reg_amt=[.000005, .01, 0.00001],
+            hidden_reg_types=["d2x", "center"],
+            hidden_reg_amt=[.000005, .01],
+            stack=None,
+            use_avg_reg=True)
 
 
-# initialize input layer to be centered
-regw = regularizers.gaussian2d(input_kern,sigma=input_kern//4)
-core.features[0].conv.weight.data = torch.einsum('ijkm,km->ijkm', core.features[0].conv.weight.data, torch.tensor(regw))
+    # initialize input layer to be centered
+    regw = regularizers.gaussian2d(input_kern,sigma=input_kern//4)
+    core.features[0].conv.weight.data = torch.einsum('ijkm,km->ijkm', core.features[0].conv.weight.data, torch.tensor(regw))
+        
+    # Readout
+    in_shape = [core.outchannels, gd.NY, gd.NX]
+    bias = True
+    readout = readouts.Point2DGaussian(in_shape, gd.NC, bias, init_mu_range=0.1, init_sigma=1, batch_sample=True,
+                    gamma_l1=0,gamma_l2=0.00001,
+                    align_corners=True, gauss_type='uncorrelated',
+                    constrain_positive=False,
+                    shifter= {'hidden_features': 20,
+                            'hidden_layers': 1,
+                            'final_tanh': False,
+                            'activation': "softplus",
+                            'lengthscale': lengthscale}
+                            )
+
     
-# Readout
-in_shape = [core.outchannels, gd.NY, gd.NX]
-bias = True
-readout = readouts.Point2DGaussian(in_shape, gd.NC, bias, init_mu_range=0.1, init_sigma=1, batch_sample=True,
-                gamma_l1=0,gamma_l2=0.00001,
-                align_corners=True, gauss_type='uncorrelated',
-                constrain_positive=False,
-                shifter= {'hidden_features': 20,
-                        'hidden_layers': 1,
-                        'final_tanh': False,
-                        'activation': "softplus",
-                        'lengthscale': lengthscale}
-                        )
+    modifiers = {'stimlist': ['frametime', 'sacoff'],
+            'gain': [sample['frametime'].shape[1], sample['sacoff'].shape[1]],
+            'offset':[sample['frametime'].shape[1],sample['sacoff'].shape[1]],
+            'stage': "readout",
+            'outdims': gd.NC}
+
+    if version > 4:
+        modifiers = None
+
+    # combine core and readout into model
+    model = encoders.EncoderMod(core, readout, modifiers=modifiers,
+        gamma_mod=0,
+        weight_decay=.001, optimizer='AdamW', learning_rate=.01, # high initial learning rate because we decay on plateau
+        betas=[.9, .999], amsgrad=False)
+
+    # initialize readout based on spike rate and STA centers
+    model.readout.bias.data = sample['robs'].mean(dim=0) # initialize readout bias helps
+    model.readout._mu.data[0,:,0,:] = torch.tensor(mu.astype('float32')) # initiaalize mus
 
 
-modifiers = {'stimlist': ['frametime', 'sacoff'],
-        'gain': [sample['frametime'].shape[1], sample['sacoff'].shape[1]],
-        'offset':[sample['frametime'].shape[1],sample['sacoff'].shape[1]],
-        'stage': "readout",
-        'outdims': gd.NC}
+    #% Train
+    trainer, train_dl, valid_dl = ut.get_trainer(gd, version=version,
+                save_dir=save_dir,
+                name=gd.id,
+                auto_lr=False,
+                max_epochs=20,
+                batchsize=1000,
+                num_workers=64,
+                earlystopping=False)
 
-# combine core and readout into model
-model = encoders.EncoderMod(core, readout, modifiers=modifiers,
-    gamma_mod=0,
-    weight_decay=.001, optimizer='AdamW', learning_rate=.01, # high initial learning rate because we decay on plateau
-    betas=[.9, .999], amsgrad=False)
-
-# initialize readout based on spike rate and STA centers
-model.readout.bias.data = sample['robs'].mean(dim=0) # initialize readout bias helps
-model.readout._mu.data[0,:,0,:] = torch.tensor(mu.astype('float32')) # initiaalize mus
-
-
-#% Train
-trainer, train_dl, valid_dl = ut.get_trainer(gd, version=version,
-            save_dir=save_dir,
-            name=gd.id,
-            auto_lr=False,
-            max_epochs=20,
-            batchsize=1000,
-            num_workers=64,
-            earlystopping=True)
-
-trainpath = os.path.join(save_dir, 'lightning_logs', 'version_{}'.format(version))
-if not os.path.exists(trainpath):
-    print("Training would have occured")
-    # trainer.fit(model, train_dl, valid_dl)
-else:
-    print("version %d already exists" % version)
+    trainpath = os.path.join(save_dir, 'lightning_logs', 'version_{}'.format(version))
+    if not os.path.exists(trainpath):
+        trainer.fit(model, train_dl, valid_dl)
+    else:
+        print("version %d already exists" % version)
 
 
 #%% Load model after fit
-version = 1
+version = 6
 outdict = ut.get_fit_versions(save_dir)
 if version is None:
     version = outdict['version_num'][np.argmin(outdict['val_loss'])]
@@ -246,8 +250,7 @@ chkpth = outdict['check_file'][vind]
 model2 = encoders.EncoderMod.load_from_checkpoint(chkpth)
 torch.nn.utils.remove_weight_norm(model2.core.features[0].conv)
 
-
-#%% Plot filters
+# Plot filters
 model2.core.plot_filters()
 
 #%% Plot utilities for shifter
@@ -317,7 +320,7 @@ gd_shift = datasets.PixelDataset(sessid, stims=['Gabor', 'Dots'],
     downsample_s=1,
     valid_eye_rad=5.2,
     dirname=data_path,
-    shifter=shifter,
+    shifter=shifter,    
     dim_order='txy',
     include_eyepos=True,
     flatten=False,  # flattens data, False for this model

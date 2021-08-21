@@ -48,12 +48,17 @@ def get_trainer(dataset,
     #     name=name,
     #     version=version  # fixed to one to ensure checkpoint load
     # )
-
-    trainer = Trainer(gpus=1, progress_bar_refresh_rate=20,
-        default_root_dir=save_dir,
-        max_epochs=max_epochs,
-        callbacks=[early_stop_callback],
-        auto_lr_find=auto_lr)
+    if earlystopping:
+        trainer = Trainer(gpus=1, progress_bar_refresh_rate=20,
+            default_root_dir=save_dir,
+            max_epochs=max_epochs,
+            callbacks=[early_stop_callback],
+            auto_lr_find=auto_lr)
+    else:
+        trainer = Trainer(gpus=1, progress_bar_refresh_rate=20,
+            default_root_dir=save_dir,
+            max_epochs=max_epochs,
+            auto_lr_find=auto_lr)
 
     # # ckpt_folder = save_dir / sessid / 'version_{}'.format(version) / 'checkpoints'
     # if earlystopping:
