@@ -3,7 +3,6 @@ import torch
 from torch import nn
 from typing import Tuple, Union
 
-# from pytorch_lightning import LightningModule
 from torch.nn import functional as F
 from torch.nn.parameter import Parameter
 from torch.nn.common_types import _size_2_t # for conv2,conv3 default

@@ -143,19 +143,17 @@ mu = plot_stas(sta)
 # get sample for computing sizes of things
 sample = gd[:2000]
 
-#%% Refit DivNorm Model on all datasets
-"""
-Fit single layer DivNorm model with modulation
-"""
 
-for version in range(10):
+#%% build model
+from neureye.models.trainers import Trainer, EarlyStopping
+from torch.utils.data import DataLoader, random_split
 
-    #% Model: convolutional model
-    input_channels = gd.num_lags
-    hidden_channels = 16
-    input_kern = 19
-    hidden_kern = 5
-    core = cores.Stacked2dDivNorm(input_channels,
+def shifter_model(hidden_channels=16,
+    input_kern = 19,
+    hidden_kern = 5,
+    modifiers=False):
+
+    core = cores.Stacked2dDivNorm(gd.num_lags,
             hidden_channels,
             input_kern,
             hidden_kern,
@@ -199,58 +197,96 @@ for version in range(10):
                             'lengthscale': lengthscale}
                             )
 
-    
-    modifiers = {'stimlist': ['frametime', 'sacoff'],
-            'gain': [sample['frametime'].shape[1], sample['sacoff'].shape[1]],
-            'offset':[sample['frametime'].shape[1],sample['sacoff'].shape[1]],
-            'stage': "readout",
-            'outdims': gd.NC}
-
-    if version > 4:
+    if modifiers:
+        modifiers = {'stimlist': ['frametime', 'sacoff'],
+                'gain': [sample['frametime'].shape[1], sample['sacoff'].shape[1]],
+                'offset':[sample['frametime'].shape[1],sample['sacoff'].shape[1]],
+                'stage': "readout",
+                'outdims': gd.NC}
+    else:
         modifiers = None
 
     # combine core and readout into model
     model = encoders.EncoderMod(core, readout, modifiers=modifiers,
-        gamma_mod=0,
-        weight_decay=.001, optimizer='AdamW', learning_rate=.01, # high initial learning rate because we decay on plateau
-        betas=[.9, .999], amsgrad=False)
+        gamma_mod=0)
 
     # initialize readout based on spike rate and STA centers
     model.readout.bias.data = sample['robs'].mean(dim=0) # initialize readout bias helps
     model.readout._mu.data[0,:,0,:] = torch.tensor(mu.astype('float32')) # initiaalize mus
 
+    return model
 
-    #% Train
-    trainer, train_dl, valid_dl = ut.get_trainer(gd, version=version,
-                save_dir=save_dir,
-                name=gd.id,
-                auto_lr=False,
-                max_epochs=20,
-                batchsize=1000,
-                num_workers=64,
-                earlystopping=False)
+def train_model(model, save_path, version,
+        batchsize = 1000,
+        weight_decay=.001,
+        learning_rate=.01, # high initial learning rate because we decay on plateau
+        betas=[.9, .999],
+        amsgrad=False,
+        early_stopping_patience=10,
+        seed=None):
 
-    trainpath = os.path.join(save_dir, 'lightning_logs', 'version_{}'.format(version))
-    if not os.path.exists(trainpath):
-        trainer.fit(model, train_dl, valid_dl)
-    else:
-        print("version %d already exists" % version)
+    import time
+    # get data
+    n_val = np.floor(len(gd)/5).astype(int)
+    n_train = (len(gd)-n_val).astype(int)
+
+    train_ds, val_ds = random_split(gd, lengths=[n_train, n_val], generator=torch.Generator().manual_seed(42))
+
+    train_dl = DataLoader(train_ds, batch_size=batchsize, num_workers=64)
+    valid_dl = DataLoader(val_ds,  batch_size=batchsize, num_workers=64)
+
+    # optimizer
+    optimizer = torch.optim.AdamW(model.parameters(),
+        lr=learning_rate,
+        betas=betas,
+        weight_decay=weight_decay,
+        amsgrad=amsgrad)
+
+    earlystopping = EarlyStopping(patience=early_stopping_patience,delta=0.0)
+
+    trainer = Trainer(model, optimizer,
+                early_stopping=earlystopping,
+                dirpath=save_path,
+                optimize_graph=True,
+                scheduler=None,
+                max_epochs=25,
+                version=version)
+
+    t0 = time.time()
+    trainer.fit( model, train_dl, valid_dl, seed=seed)
+    t1 = time.time()
+
+    print('  Fit complete:', t1-t0, 'sec elapsed')
+
+#%% Do fitting
+
+for version in range(2,6):
+    
+    model = shifter_model()
+
+    save_path = os.path.join(save_dir, 'jake_trainer')
+
+    train_model(model, save_path, version)
 
 
-#%% Load model after fit
-version = 6
-outdict = ut.get_fit_versions(save_dir)
+#%%
+# model2 = model
+# #%% Load model after fit
+save_path = os.path.join(save_dir, 'jake_trainer')
+version = None
+outdict = ut.get_fit_versions(save_path)
 if version is None:
     version = outdict['version_num'][np.argmin(outdict['val_loss'])]
     print("No version requested. Best version is %d" %version)
 
 vind = np.where(np.asarray(outdict['version_num']) == version)[0][0]
-chkpth = outdict['check_file'][vind]
+mod_path = outdict['model_file'][vind]
 
-model2 = encoders.EncoderMod.load_from_checkpoint(chkpth)
+model2 = torch.load(mod_path)
+# model2 = encoders.EncoderMod.load_from_checkpoint(modpath)
 torch.nn.utils.remove_weight_norm(model2.core.features[0].conv)
 
-# Plot filters
+#%% Plot filters
 model2.core.plot_filters()
 
 #%% Plot utilities for shifter
@@ -334,5 +370,3 @@ sta_shift = get_stas(gd_shift, index)
 
 #%% Plot STAS
 mu = plot_stas(sta_shift)
-
-# %%

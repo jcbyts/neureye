@@ -1,15 +1,15 @@
 import torch
 from torch import nn
 from collections import OrderedDict
-from pytorch_lightning import LightningModule
 from torch.nn import functional as F
 from .layers import PosLinear
 from torch.nn.parameter import Parameter
+from neureye.models.utils import save_hyperparameters
 
 """
 Readout Base class
 """
-class Readout(LightningModule):
+class Readout(nn.Module):
     def initialize(self, *args, **kwargs):
         raise NotImplementedError("initialize is not implemented for ", self.__class__.__name__)
 
@@ -46,7 +46,8 @@ class FullReadout(Readout):
         **kwargs):
         super().__init__()
 
-        self.save_hyperparameters()
+        self.hparams = save_hyperparameters()
+
         self.gamma_readout = gamma_readout
 
         if constrain_positive:
@@ -142,7 +143,7 @@ class Point2DGaussian(Readout):
         super().__init__()
 
         # pytorch lightning helper to save all hyperparamters
-        self.save_hyperparameters()
+        self.hparams = save_hyperparameters()
 
         # determines whether the Gaussian is isotropic or not
         self.gauss_type = gauss_type

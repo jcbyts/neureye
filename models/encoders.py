@@ -2,16 +2,15 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from pytorch_lightning import LightningModule
-
 # import regularizers
-from V1FreeViewingCode.models.readouts import Readout
-from V1FreeViewingCode.models.cores import Core
+from neureye.models.readouts import Readout
+from neureye.models.cores import Core
+from neureye.models.utils import save_hyperparameters
 
 """
 Main encoder class
 """
-class Encoder(LightningModule):
+class Encoder(nn.Module):
     def __init__(self,
         core=Core(),
         readout=Readout(),
@@ -19,24 +18,15 @@ class Encoder(LightningModule):
         loss=nn.PoissonNLLLoss(log_input=False),
         val_loss=None,
         detach_core=False,
-        learning_rate=1e-3,
-        batch_size=1000,
-        num_workers=0,
         data_dir='',
-        optimizer='AdamW',
-        weight_decay=1e-2,
-        amsgrad=False,
-        betas=[.9,.999],
-        max_iter=10000,
         **kwargs):
 
         super().__init__()
         self.core = core
         self.readout = readout
         self.detach_core = detach_core
-        self.save_hyperparameters('learning_rate','batch_size',
-            'num_workers', 'data_dir', 'optimizer', 'weight_decay', 'amsgrad', 'betas',
-            'max_iter')          
+
+        self.hparams = save_hyperparameters()
         
         if val_loss is None:
             self.val_loss = loss
@@ -57,7 +47,7 @@ class Encoder(LightningModule):
 
         return self.output_nl(x)
 
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch, batch_idx=None):
         x = batch['stim']
         y = batch['robs']
         if "shifter" in dir(self.readout) and batch['eyepos'] is not None and self.readout.shifter:
@@ -68,10 +58,9 @@ class Encoder(LightningModule):
         loss = self.loss(y_hat, y)
         regularizers = int(not self.detach_core) * self.core.regularizer() + self.readout.regularizer()
 
-        self.log('train_loss', loss + regularizers)
-        return {'loss': loss + regularizers}
+        return {'loss': loss + regularizers, 'train_loss': loss, 'reg_loss': regularizers}
 
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx=None):
 
         x = batch['stim']
         y = batch['robs']
@@ -80,40 +69,19 @@ class Encoder(LightningModule):
         else:
             y_hat = self(x)
         loss = self.val_loss(y_hat, y)
-        self.log('val_loss', loss)
-        return {'loss': loss}
 
-    def validation_epoch_end(self, validation_step_outputs):
-        # logging
-        if(self.current_epoch==1):
-            self.logger.experiment.add_text('core', str(dict(self.core.hparams)))
-            self.logger.experiment.add_text('readout', str(dict(self.readout.hparams)))
+        return {'loss': loss, 'val_loss': loss}
 
-        avg_val_loss = torch.tensor([x['loss'] for x in validation_step_outputs]).mean()
+    # def validation_epoch_end(self, validation_step_outputs):
+    #     # logging
+    #     if(self.current_epoch==1):
+    #         self.logger.experiment.add_text('core', str(dict(self.core.hparams)))
+    #         self.logger.experiment.add_text('readout', str(dict(self.readout.hparams)))
 
-        self.log('val_loss', avg_val_loss, on_step=False, on_epoch=True, prog_bar=True)
-        return
+    #     avg_val_loss = torch.tensor([x['loss'] for x in validation_step_outputs]).mean()
 
-
-    def configure_optimizers(self):
-        
-        if self.hparams.optimizer=='LBFGS':
-            optimizer = torch.optim.LBFGS(self.parameters(),
-                lr=self.hparams.learning_rate,
-                max_iter=10000) #, max_eval=None, tolerance_grad=1e-07, tolerance_change=1e-09, history_size=100)
-        elif self.hparams.optimizer=='AdamW':
-            optimizer = torch.optim.AdamW(self.parameters(),
-                lr=self.hparams.learning_rate,
-                betas=self.hparams.betas,
-                weight_decay=self.hparams.weight_decay,
-                amsgrad=self.hparams.amsgrad)
-        elif self.hparams.optimizer=='Adam':
-            optimizer = torch.optim.Adam(self.parameters(),
-            lr=self.hparams.learning_rate)
-        
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
-        
-        return {'optimizer': optimizer, 'lr_scheduler': scheduler, 'monitor': 'val_loss'}
+    #     self.log('val_loss', avg_val_loss, on_step=False, on_epoch=True, prog_bar=True)
+    #     return
     
     def on_save_checkpoint(self, checkpoint):
         # track the core, readout, shifter class and state_dicts
@@ -132,7 +100,7 @@ class Encoder(LightningModule):
         self.core.load_state_dict(checkpoint['core_state_dict'])
         self.readout.load_state_dict(checkpoint['readout_state_dict'])
 
-class EncoderMod(LightningModule): # IN PROGRESS
+class EncoderMod(nn.Module): # IN PROGRESS
     def __init__(self,
         core=Core(),
         readout=Readout(),
@@ -141,26 +109,13 @@ class EncoderMod(LightningModule): # IN PROGRESS
         gamma_mod=.1,
         loss=nn.PoissonNLLLoss(log_input=False),
         val_loss=None,
-        detach_core=False,
-        learning_rate=1e-3,
-        batch_size=1000,
-        num_workers=0,
-        data_dir='',
-        optimizer='AdamW',
-        weight_decay=1e-2,
-        amsgrad=False,
-        betas=[.9,.999],
-        max_iter=10000,
-        lrscheduler=True,
-        **kwargs):
+        detach_core=False):
 
         super().__init__()
         self.core = core
         self.readout = readout
         self.detach_core = detach_core
-        self.save_hyperparameters('learning_rate','batch_size',
-            'num_workers', 'data_dir', 'optimizer', 'weight_decay', 'amsgrad', 'betas',
-            'max_iter','modifiers', 'gamma_mod', 'lrscheduler')
+        self.hparams = save_hyperparameters()
         
         # initialize variables for modifier: these all need to be here regardless of whether the modifiers are used so we can load the model checkpoints
         self.offsets = nn.ModuleList()
@@ -264,7 +219,7 @@ class EncoderMod(LightningModule): # IN PROGRESS
 
         return self.output_nl(x)
 
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch, batch_idx=None):
         x = batch['stim']
         y = batch['robs']
         if "shifter" in dir(self.readout) and batch['eyepos'] is not None and self.readout.shifter:
@@ -288,10 +243,11 @@ class EncoderMod(LightningModule): # IN PROGRESS
             for imod in range(len(self.gains)):
                 reg += self.offsets[imod].weight.pow(2).sum().sqrt()
 
-        self.log('train_loss', loss, 'reg_pen', regularizers + self.hparams.gamma_mod * reg)
-        return {'loss': loss + regularizers + self.hparams.gamma_mod * reg}
+        regularizers = regularizers + self.hparams.gamma_mod * reg
+        # self.log('train_loss', loss, 'reg_pen', regularizers + self.hparams.gamma_mod * reg)
+        return {'loss': loss + regularizers, 'train_loss': loss, 'reg_loss': regularizers}
     
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx=None):
 
         x = batch['stim']
         y = batch['robs']
@@ -307,44 +263,18 @@ class EncoderMod(LightningModule): # IN PROGRESS
         
 
         loss = self.loss(y_hat, y)
-        self.log('val_loss', loss)
-        return {'loss': loss}
+        return {'loss': loss, 'val_loss': loss}
 
-    def validation_epoch_end(self, validation_step_outputs):
-        # logging
-        if(self.current_epoch==1):
-            self.logger.experiment.add_text('core', str(dict(self.core.hparams)))
-            self.logger.experiment.add_text('readout', str(dict(self.readout.hparams)))
+    # def validation_epoch_end(self, validation_step_outputs):
+    #     # logging
+    #     if(self.current_epoch==1):
+    #         self.logger.experiment.add_text('core', str(dict(self.core.hparams)))
+    #         self.logger.experiment.add_text('readout', str(dict(self.readout.hparams)))
 
-        avg_val_loss = torch.tensor([x['loss'] for x in validation_step_outputs]).mean()
+    #     avg_val_loss = torch.tensor([x['loss'] for x in validation_step_outputs]).mean()
 
-        self.log('val_loss', avg_val_loss, on_step=False, on_epoch=True, prog_bar=True)
-        return
-
-
-    def configure_optimizers(self):
-        
-        if self.hparams.optimizer=='LBFGS':
-            optimizer = torch.optim.LBFGS(self.parameters(),
-                lr=self.hparams.learning_rate,
-                max_iter=10000) #, max_eval=None, tolerance_grad=1e-07, tolerance_change=1e-09, history_size=100)
-        elif self.hparams.optimizer=='AdamW':
-            optimizer = torch.optim.AdamW(self.parameters(),
-                lr=self.hparams.learning_rate,
-                betas=self.hparams.betas,
-                weight_decay=self.hparams.weight_decay,
-                amsgrad=self.hparams.amsgrad)
-        elif self.hparams.optimizer=='Adam':
-            optimizer = torch.optim.Adam(self.parameters(),
-            lr=self.hparams.learning_rate)
-        
-        if self.hparams.lrscheduler:
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
-            out = {'optimizer': optimizer, 'lr_scheduler': scheduler, 'monitor': 'val_loss'}
-        else:
-            out = optimizer
-        
-        return out
+    #     self.log('val_loss', avg_val_loss, on_step=False, on_epoch=True, prog_bar=True)
+    #     return
     
     def on_save_checkpoint(self, checkpoint):
         # track the core, readout, shifter class and state_dicts
@@ -367,109 +297,102 @@ class EncoderMod(LightningModule): # IN PROGRESS
         # keylist = list(checkpoint['state_dict'].keys())
         # offsetlist = [key if key[0:6]=='offset' for key in keylist]
 
-import V1FreeViewingCode.models.layers as layers
-import V1FreeViewingCode.models.regularizers as regularizers
-class GLM(LightningModule):
-    def __init__(self,
-        input_size,
-        output_size,
-        bias = True,
-        l1_strength: float = 0.0,
-        l2_strength: float = 0.0,
-        tik_reg_types=["d2x", "d2t"],
-        tik_reg_amt=[.005,.001],
-        output_nl=nn.Softplus(),
-        loss=nn.PoissonNLLLoss(log_input=False),
-        val_loss=None,
-        learning_rate=1e-3,
-        data_dir='',
-        optimizer='AdamW',
-        weight_decay=1e-2,
-        amsgrad=False,
-        betas=[.9,.999],
-        max_iter=10000,
-        **kwargs):
+# import V1FreeViewingCode.models.layers as layers
+# import V1FreeViewingCode.models.regularizers as regularizers
+# class GLM(nn.Module):
+#     def __init__(self,
+#         input_size,
+#         output_size,
+#         bias = True,
+#         l1_strength: float = 0.0,
+#         l2_strength: float = 0.0,
+#         tik_reg_types=["d2x", "d2t"],
+#         tik_reg_amt=[.005,.001],
+#         output_nl=nn.Softplus(),
+#         loss=nn.PoissonNLLLoss(log_input=False),
+#         val_loss=None,
+#         **kwargs):
 
-        super().__init__()
+#         super().__init__()
         
-        self.save_hyperparameters()
+#         self.save_hyperparameters()
 
-        regularizer_config = {'dims': input_size,
-                            'type': tik_reg_types, 'amount': tik_reg_amt}
-        self._tik_weights_regularizer = regularizers.__dict__["RegMats"](**regularizer_config)
+#         regularizer_config = {'dims': input_size,
+#                             'type': tik_reg_types, 'amount': tik_reg_amt}
+#         self._tik_weights_regularizer = regularizers.__dict__["RegMats"](**regularizer_config)
         
         
-        if val_loss is None:
-            self.val_loss = loss
-        else:
-            self.val_loss = val_loss
+#         if val_loss is None:
+#             self.val_loss = loss
+#         else:
+#             self.val_loss = val_loss
 
-        self.linear = layers.ShapeLinear(input_size, output_size, bias=bias)
-        self.output_nl = output_nl
-        self.loss = loss
+#         self.linear = layers.ShapeLinear(input_size, output_size, bias=bias)
+#         self.output_nl = output_nl
+#         self.loss = loss
 
-    def forward(self, x):
-        x = self.linear(x)
+#     def forward(self, x):
+#         x = self.linear(x)
 
-        return self.output_nl(x)
+#         return self.output_nl(x)
 
-    def training_step(self, batch, batch_idx):
-        x = batch['stim']
-        y = batch['robs']
+#     def training_step(self, batch, batch_idx=None):
+#         x = batch['stim']
+#         y = batch['robs']
         
-        y_hat = self(x)
+#         y_hat = self(x)
 
-        loss = self.loss(y_hat, y)
+#         loss = self.loss(y_hat, y)
 
-        # L1 regularizer
-        if self.hparams.l1_strength > 0:
-            l1_reg = sum(param.abs().sum() for param in self.parameters())
-            loss += self.hparams.l1_strength * l1_reg
+#         # L1 regularizer
+#         if self.hparams.l1_strength > 0:
+#             l1_reg = sum(param.abs().sum() for param in self.parameters())
+#             loss += self.hparams.l1_strength * l1_reg
 
-        # L2 regularizer
-        if self.hparams.l2_strength > 0:
-            l2_reg = sum(param.pow(2).sum() for param in self.parameters())
-            loss += self.hparams.l2_strength * l2_reg
+#         # L2 regularizer
+#         if self.hparams.l2_strength > 0:
+#             l2_reg = sum(param.pow(2).sum() for param in self.parameters())
+#             loss += self.hparams.l2_strength * l2_reg
         
         
-        loss += self._tik_weights_regularizer(self.linear.weight)
+#         loss += self._tik_weights_regularizer(self.linear.weight)
 
-        self.log('train_loss', loss)
-        return {'loss': loss}
+#         self.log('train_loss', loss)
+#         return {'loss': loss}
 
-    def validation_step(self, batch, batch_idx):
+#     def validation_step(self, batch, batch_idx=None):
 
-        x = batch['stim']
-        y = batch['robs']
-        y_hat = self(x)
-        loss = self.val_loss(y_hat, y)
+#         x = batch['stim']
+#         y = batch['robs']
+#         y_hat = self(x)
+#         loss = self.val_loss(y_hat, y)
 
-        self.log('val_loss', loss)
-        return {'loss': loss}
+#         self.log('val_loss', loss)
+#         return {'loss': loss}
 
-    def validation_epoch_end(self, validation_step_outputs):
-        # logging
-        avg_val_loss = torch.tensor([x['loss'] for x in validation_step_outputs]).mean()
-        self.log('val_loss', avg_val_loss, on_step=False, on_epoch=True, prog_bar=True)
-        return
+#     def validation_epoch_end(self, validation_step_outputs):
+#         # logging
+#         avg_val_loss = torch.tensor([x['loss'] for x in validation_step_outputs]).mean()
+#         self.log('val_loss', avg_val_loss, on_step=False, on_epoch=True, prog_bar=True)
+#         return
 
 
-    def configure_optimizers(self):
+#     def configure_optimizers(self):
         
-        if self.hparams.optimizer=='LBFGS':
-            optimizer = torch.optim.LBFGS(self.parameters(),
-                lr=self.hparams.learning_rate,
-                max_iter=10000) #, max_eval=None, tolerance_grad=1e-07, tolerance_change=1e-09, history_size=100)
-        elif self.hparams.optimizer=='AdamW':
-            optimizer = torch.optim.AdamW(self.parameters(),
-                lr=self.hparams.learning_rate,
-                betas=self.hparams.betas,
-                weight_decay=self.hparams.weight_decay,
-                amsgrad=self.hparams.amsgrad)
-        elif self.hparams.optimizer=='Adam':
-            optimizer = torch.optim.Adam(self.parameters(),
-            lr=self.hparams.learning_rate)
+#         if self.hparams.optimizer=='LBFGS':
+#             optimizer = torch.optim.LBFGS(self.parameters(),
+#                 lr=self.hparams.learning_rate,
+#                 max_iter=10000) #, max_eval=None, tolerance_grad=1e-07, tolerance_change=1e-09, history_size=100)
+#         elif self.hparams.optimizer=='AdamW':
+#             optimizer = torch.optim.AdamW(self.parameters(),
+#                 lr=self.hparams.learning_rate,
+#                 betas=self.hparams.betas,
+#                 weight_decay=self.hparams.weight_decay,
+#                 amsgrad=self.hparams.amsgrad)
+#         elif self.hparams.optimizer=='Adam':
+#             optimizer = torch.optim.Adam(self.parameters(),
+#             lr=self.hparams.learning_rate)
         
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+#         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
         
-        return {'optimizer': optimizer, 'lr_scheduler': scheduler, 'monitor': 'val_loss'}
+#         return {'optimizer': optimizer, 'lr_scheduler': scheduler, 'monitor': 'val_loss'}

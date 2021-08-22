@@ -6,16 +6,15 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from pytorch_lightning import LightningModule
-
 # import regularizers
 import neureye.models.regularizers as regularizers
 from neureye.models.layers import AdaptiveELU, divNorm
+from neureye.models.utils import save_hyperparameters
 
 """ 
 Base classes:
 """
-class Core(LightningModule):
+class Core(nn.Module):
     def initialize(self):
         raise NotImplementedError("Not initializing")
 
@@ -46,8 +45,8 @@ class Core(LightningModule):
         else:
             cinds = np.arange(0, nfilt)
 
-        sx = np.ceil(np.sqrt(nfilt*2))
-        sy = np.round(np.sqrt(nfilt*2))
+        sx = int(np.ceil(np.sqrt(nfilt*2)))
+        sy = int(np.round(np.sqrt(nfilt*2)))
         # sx,sy = U.get_subplot_dims(nfilt*2)
         mod2 = sy % 2
         sy += mod2
@@ -165,9 +164,6 @@ class Stacked2dCore(Core2d):
         else:
             self.stack = [*range(self.layers)[stack:]] if isinstance(stack, int) else stack
 
-        # # center regularization
-        # regw = 1 - regularizers.gaussian2d(input_kern,sigma=input_kern//2)
-        # self.register_buffer("center_reg_weights", torch.tensor(regw))
 
     def forward(self, input_):
         ret = []
@@ -226,8 +222,8 @@ class Stacked2dCore(Core2d):
         else:
             cinds = np.arange(0, nfilt)
 
-        sx = np.ceil(np.sqrt(nfilt*2))
-        sy = np.round(np.sqrt(nfilt*2))
+        sx = int(np.ceil(np.sqrt(nfilt*2)))
+        sy = int(np.round(np.sqrt(nfilt*2)))
         # sx,sy = U.get_subplot_dims(nfilt*2)
         mod2 = sy % 2
         sy += mod2
@@ -275,7 +271,22 @@ class Stacked2dDivNorm(Stacked2dCore):
         hidden_dilation=1,
         **kwargs):
 
-        self.save_hyperparameters()
+        # save hyperparameters manually for logging (PL did this all fancy like)
+        self.hparams = save_hyperparameters()
+        # self.hparams.input_channels = input_channels
+        # self.hparams.hidden_channels = hidden_channels
+        # self.hparams.input_kern = input_kern
+        # self.hparams.hidden_kern = hidden_kern
+        # self.hparams.activation = activation
+        # self.hparams.final_nonlinearity = final_nonlinearity
+        # self.hparams.bias = bias
+        # self.hparams.pad_input = pad_input
+        # self.hparams.hidden_padding = hidden_padding
+        # self.hparams.group_norm = group_norm
+        # self.hparams.num_groups = num_groups
+        # self.hparams.weight_norm = weight_norm
+        # self.hparams.hidden_dilation = hidden_dilation
+
 
         super().__init__(input_channels,hidden_channels,input_kern,hidden_kern,**kwargs)
 
