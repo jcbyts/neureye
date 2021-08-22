@@ -260,9 +260,9 @@ def train_model(model, save_path, version,
 
 #%% Do fitting
 
-for version in range(2,6):
+for version in range(5,10):
     
-    model = shifter_model()
+    model = shifter_model(modifiers=True)
 
     save_path = os.path.join(save_dir, 'jake_trainer')
 
@@ -370,3 +370,4 @@ sta_shift = get_stas(gd_shift, index)
 
 #%% Plot STAS
 mu = plot_stas(sta_shift)
+# %%
