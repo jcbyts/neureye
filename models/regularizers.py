@@ -144,10 +144,11 @@ class Laplace3d(nn.Module):
 
     def __init__(self, padding=None):
         super().__init__()
+        self.padding = padding
         self.register_buffer("filter", torch.from_numpy(laplace3d()))
 
     def forward(self, x):
-        return F.conv3d(x, self.filter, bias=None)
+        return F.conv3d(x, self.filter, bias=None, padding=self.padding)
 
 
 class LaplaceL23d(nn.Module):
@@ -155,9 +156,9 @@ class LaplaceL23d(nn.Module):
     Laplace regularizer for a 2D convolutional layer.
     """
 
-    def __init__(self):
+    def __init__(self, padding=None):
         super().__init__()
-        self.laplace = Laplace3d()
+        self.laplace = Laplace3d(padding=padding)
 
     def forward(self, x):
         oc, ic, k1, k2, k3 = x.size()

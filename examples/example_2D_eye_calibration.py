@@ -258,38 +258,7 @@ def train_model(model, save_path, version,
 
     print('  Fit complete:', t1-t0, 'sec elapsed')
 
-#%% Do fitting
-
-for version in range(5,10):
-    
-    model = shifter_model(modifiers=True)
-
-    save_path = os.path.join(save_dir, 'jake_trainer')
-
-    train_model(model, save_path, version)
-
-
-#%%
-# model2 = model
-# #%% Load model after fit
-save_path = os.path.join(save_dir, 'jake_trainer')
-version = None
-outdict = ut.get_fit_versions(save_path)
-if version is None:
-    version = outdict['version_num'][np.argmin(outdict['val_loss'])]
-    print("No version requested. Best version is %d" %version)
-
-vind = np.where(np.asarray(outdict['version_num']) == version)[0][0]
-mod_path = outdict['model_file'][vind]
-
-model2 = torch.load(mod_path)
-# model2 = encoders.EncoderMod.load_from_checkpoint(modpath)
-torch.nn.utils.remove_weight_norm(model2.core.features[0].conv)
-
-#%% Plot filters
-model2.core.plot_filters()
-
-#%% Plot utilities for shifter
+# Plot utilities for shifter
 def plot_shifter(shifter, valid_eye_rad=5.2, ngrid = 100):
     xx,yy = np.meshgrid(np.linspace(-valid_eye_rad, valid_eye_rad,ngrid),np.linspace(-valid_eye_rad, valid_eye_rad,ngrid))
     xgrid = torch.tensor( xx.astype('float32').reshape( (-1,1)))
@@ -343,6 +312,39 @@ def shift_stim(self, im, eyepos):
         im2 = im2[:,0,:,:].permute((1,2,0)).detach().cpu().numpy()
 
         return im2
+
+#%% Do fitting
+
+for version in [11]:
+    
+    model = shifter_model(modifiers=True)
+
+    save_path = os.path.join(save_dir, 'jake_trainer')
+
+    train_model(model, save_path, version)
+
+
+#%%
+# model2 = model
+# #%% Load model after fit
+save_path = os.path.join(save_dir, 'jake_trainer')
+version = 11
+outdict = ut.get_fit_versions(save_path)
+if version is None:
+    version = outdict['version_num'][np.argmin(outdict['val_loss'])]
+    print("No version requested. Best version is %d" %version)
+
+vind = np.where(np.asarray(outdict['version_num']) == version)[0][0]
+mod_path = outdict['model_file'][vind]
+
+model2 = torch.load(mod_path)
+# model2 = encoders.EncoderMod.load_from_checkpoint(modpath)
+torch.nn.utils.remove_weight_norm(model2.core.features[0].conv)
+
+# Plot filters
+model2.core.plot_filters()
+
+
 
 #%% Plot shifter
 

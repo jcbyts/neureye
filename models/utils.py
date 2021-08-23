@@ -135,7 +135,7 @@ def get_fit_versions(save_path):
         tfeventsfiles = [x for x in vplist if 'events.out.tfevents' in x]
         modelfiles = [x for x in vplist if 'model.pt' in x]
 
-        if len(tfeventsfiles) == 1 and len(modelfiles) == 1:
+        if len(tfeventsfiles) > 0 and len(modelfiles) == 1:
             evfile = os.path.join(vpath, tfeventsfiles[0])
             # read from tensorboard backend
             ea = event_accumulator.EventAccumulator(evfile)
