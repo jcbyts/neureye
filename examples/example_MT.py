@@ -22,9 +22,6 @@ import neureye.models.regularizers as regularizers
 import neureye.models.utils as ut
 
 
-#%%
-import importlib
-importlib.reload(datasets)
 # %% Load data
 sess = '20190120'
 data_dir = '/home/jake/Data/Datasets/MitchellV1FreeViewing/MT_RF/'
@@ -46,7 +43,7 @@ class GLM(nn.Module):
             nn.Linear(self.NI, NC, bias=bias),
             nn.Softplus()
         )
-        self.reg = regularizers.RegMats(dims=[dims[3], dims[1], dims[2]], type=['d2xt'], amount=[1])
+        self.reg = regularizers.RegMats(dims=[dims[3], dims[1], dims[2]], type=['d2x', 'd2t'], amount=[.5, 1])
         self.gamma = gamma
         self.gamma_l1 = gamma_l1
         self.initialize()
@@ -90,14 +87,14 @@ class GLM(nn.Module):
                                 max_iter=4,
                                 line_search_fn="strong_wolfe")
 
-        early_stopping = trainers.EarlyStopping(patience=3)
+        early_stopping = trainers.EarlyStopping(patience=1)
 
         trainer = trainers.Trainer(glm, optimizer=optimizer,
             early_stopping=early_stopping, version=version,
             dirpath=save_path,
             max_epochs=max_epochs, optimize_graph=True)
 
-        trainer.fit(glm, train_dl, val_dl)
+        trainer.fit(glm, train_dl, val_dl, seed=666)
 
         sample = val_ds[:]
         self.to('cpu')
@@ -115,99 +112,87 @@ class GLM(nn.Module):
 
 
 # %% Train model
-# loop over regularization values to find best
-gammas = [1e-6, 1e-5, 1e-4, 1e-3]
 dims = [mt_ds.num_channels, mt_ds.NX, mt_ds.NY, mt_ds.num_lags]
-batch_size = 1000
-val_loss = np.zeros((len(gammas), mt_ds.NC))
+batch_size = 10000 # Should be big (using L-BFGS), but set for your GPU size
 save_path = os.path.join('.', 'checkpoints', 'mt_glm')
 
-for version, gamma in enumerate(gammas):
+glm = GLM(dims, mt_ds.NC, gamma=2e-5, gamma_l1=1e-4) # glm with d2xt and l1
+val_loss = glm.fit(mt_ds, batch_size=batch_size, version=None, save_path=save_path)
 
-    print("%d) gamma = %0.7f" % (version, gamma))
-    glm = GLM(dims, mt_ds.NC, gamma=gamma, gamma_l1=1e-4)
-    val_loss[version,:] = glm.fit(mt_ds, batch_size=batch_size, version=version, save_path=save_path)
+glm.gamma_l1=1e-1 # step up L1 penalty, see if it cleans up
+val_loss = glm.fit(mt_ds, batch_size=batch_size, version=None, save_path=save_path)
+
+#%% plot
+wtsAll = glm.features[1].weight.detach().cpu().numpy().T
     
-
-# %%
-best_val = [np.argmin(val_loss[:,cc]) for cc in range(glm.NC)]
-print(best_val)
-train_dict = ut.get_fit_versions(save_path)
-
-version = 1
-index = [ii for ii,v in enumerate(train_dict['version_num']) if v==version][0]
-
-glm = torch.load(train_dict['model_file'][index])
-
-cc = 0
-# %%
-
-cc += 1
 NX = mt_ds.NX
 NY = mt_ds.NY
 num_lags = mt_ds.num_lags
 xx = np.meshgrid(mt_ds.xax, mt_ds.yax)
 
-wtsFull = glm.features[1].weight[cc,:].detach().cpu().numpy()
+plt.figure(figsize=(4, glm.NC*2))
 
-wts = np.reshape(wtsFull, glm.dims)
+for cc in range(glm.NC):
 
-tpower = np.std(wts.reshape(-1,glm.dims[-1]), axis=0)
-peak_lag = np.argmax(tpower)
+    wtsFull = wtsAll[:,cc]
 
-I = wts[:,:,:,peak_lag]
+    wts = np.reshape(wtsFull, glm.dims)
 
-dx = I[0, :,:]
-dy = I[1, :,:]
+    tpower = np.std(wts.reshape(-1,glm.dims[-1]), axis=0)
+    peak_lag = np.argmax(tpower)
 
-plt.figure(figsize=(8,4))
-plt.tight_layout()
+    I = wts[:,:,:,peak_lag]
 
-ax = plt.subplot(1,3,1)
-amp = np.hypot(dx, dy)
+    dx = I[0, :,:]
+    dy = I[1, :,:]
 
-peak_space = np.where(amp==np.max(amp))
-min_space = np.where(amp==np.min(amp))
-# plt.quiver(xx[0], xx[1], dx/np.max(amp), dy/np.max(amp), # np.arctan2(dx, dy)/np.pi*180, cmap=plt.cm.v  ,
-#         pivot='tail',units='width', width=.008,
-#         scale=15, headwidth=5, headlength=5)
-        
-plt.quiver(xx[0]-np.mean(xx[0]), xx[1]-np.mean(xx[1]), dx/np.max(amp), dy/np.max(amp), # np.arctan2(dx, dy)/np.pi*180, cmap=plt.cm.v  ,
-        pivot='tail',units='width', width=.008,
-        scale=15, headwidth=5, headlength=5)
+    # plt.figure(figsize=(8,4))
+    # plt.tight_layout()
+
+    ax = plt.subplot(glm.NC,2,cc*2+1)
+    amp = np.hypot(dx, dy)
+
+    peak_space = np.where(amp==np.max(amp))
+    min_space = np.where(amp==np.min(amp))
+
+    plt.quiver(xx[0]-np.mean(xx[0]), xx[1]-np.mean(xx[1]), dx/np.max(amp), dy/np.max(amp), # np.arctan2(dx, dy)/np.pi*180, cmap=plt.cm.v  ,
+            pivot='tail',units='width', width=.008,
+            scale=10, headwidth=2.5, headlength=2.5)
 
 
-plt.axhline(0, color='gray', )
-plt.axvline(0, color='gray')
+    plt.axhline(0, color='gray', )
+    plt.axvline(0, color='gray')
 
-plt.xlabel('Azimuth (d.v.a.)')
-plt.ylabel('Elevation (d.v.a)')
+    plt.xlabel('Azimuth (d.v.a.)')
+    plt.ylabel('Elevation (d.v.a)')
 
-plt.xticks(np.arange(-15,18,5))
+    plt.xticks(np.arange(-15,18,5))
 
-plt.subplot(1,3,2)
-# w = wts.transpose((1,2,0))
+    ax2 = plt.subplot(glm.NC,2,cc*2+2)
+    # w = wts.transpose((1,2,0))
 
-amp /= np.sum(amp)
+    amp /= np.sum(amp)
 
-muw = np.array( (dx.flatten() @ amp.flatten(), dy.flatten() @ amp.flatten()))
-muw /= np.hypot(muw[0], muw[1])
+    muw = np.array( (dx.flatten() @ amp.flatten(), dy.flatten() @ amp.flatten()))
+    muw /= np.hypot(muw[0], muw[1])
 
-tpeak =  wts[0,peak_space[0],peak_space[1],:].flatten()*muw[0] + wts[1, peak_space[0],peak_space[1],:].flatten()*muw[1]
-tmin =  wts[0,min_space[0],min_space[1],:].flatten()*muw[0] + wts[1, min_space[0],min_space[1],:].flatten()*muw[1]
-lags = np.arange(0, num_lags, 1)*1000/120
-plt.plot(lags, tpeak, '-o', color='b', ms=3)
-plt.plot(lags, tmin, '-o', color='r', ms=3)
-plt.xlabel('Lags (ms)')
-plt.ylabel('Power (along preferred direction)')
+    tpeak =  wts[0,peak_space[0],peak_space[1],:].flatten()*muw[0] + wts[1, peak_space[0],peak_space[1],:].flatten()*muw[1]
+    tmin =  wts[0,min_space[0],min_space[1],:].flatten()*muw[0] + wts[1, min_space[0],min_space[1],:].flatten()*muw[1]
+    lags = np.arange(0, num_lags, 1)*1000/120
+    plt.plot(lags, tpeak, '-o', color='b', ms=3)
+    plt.plot(lags, tmin, '-o', color='r', ms=3)
+    plt.xlabel('Lags (ms)')
+    plt.ylabel('Power (along preferred direction)')
 
-plt.axhline(0, color='gray')
+    plt.axhline(0, color='gray')
 
-f = plt.xticks(np.arange(0,200,50))
+    # f = plt.xticks(np.arange(0,200,50))
+    # plt.show()
 
-#%% get tuning
+plt.show()
+#%% TODO: get tuning curves for each cell
 
-mask = ((amp/np.max(amp)) > .5).flatten()
+# mask = ((amp/np.max(amp)) > .5).flatten()
 
 # #%%
 # sfilt = Stim * mask
@@ -290,3 +275,36 @@ mask = ((amp/np.max(amp)) > .5).flatten()
 #     'pcov': pcov}
 
 # RF.append(RF_)
+
+
+#%% loop over reg vals
+# %% Train model
+# loop over regularization values to find best
+gammas = [1e-6, 1e-5, 1e-4, 1e-3]
+dims = [mt_ds.num_channels, mt_ds.NX, mt_ds.NY, mt_ds.num_lags]
+batch_size = 1000
+val_loss = np.zeros((len(gammas), mt_ds.NC))
+save_path = os.path.join('.', 'checkpoints', 'mt_glm')
+
+for version, gamma in enumerate(gammas):
+
+    print("%d) gamma = %0.7f" % (version, gamma))
+    glm = GLM(dims, mt_ds.NC, gamma=gamma, gamma_l1=1e-5)
+    val_loss[version,:] = glm.fit(mt_ds, batch_size=batch_size, version=version, save_path=save_path)
+    
+
+# %%
+best_val = [np.argmin(val_loss[:,cc]) for cc in range(glm.NC)]
+print(best_val)
+train_dict = ut.get_fit_versions(save_path)
+
+# populate weight matrix with the weights from the best reg value for each cell
+best_vers = np.asarray(best_val)
+versions = np.unique(best_vers)
+wtsAll = np.zeros( (np.prod(np.asarray(glm.dims)), glm.NC) )
+for version in versions:
+    index = [ii for ii,v in enumerate(train_dict['version_num']) if v==version][0]
+    glm = torch.load(train_dict['model_file'][index])
+    wts = glm.features[1].weight.detach().cpu().numpy()
+    cids = np.where(best_vers==version)[0]
+    wtsAll[:,cids] = wts[cids,:].T
