@@ -1,5 +1,7 @@
 #%% 
 import sys
+
+from numpy.core.fromnumeric import size
 # sys.path.insert(0, '/home/jake/Repos/')
 sys.path.insert(0, '/home/jake/Data/Repos/')
 
@@ -11,6 +13,8 @@ import torch.nn as nn
 
 import matplotlib.pyplot as plt  # plotting
 import seaborn as sns
+plt.rcParams["figure.autolayout"] = True
+plt.rcParams['pdf.fonttype'] = 42
 
 # the dataset
 import datasets.mitchell.mtdots as datasets
@@ -142,9 +146,12 @@ for ii,cc in enumerate(cids):
     dy = rf['dy']
     amp = rf['amp']
     plt.quiver(xx[0]-np.mean(xx[0]), xx[1]-np.mean(xx[1]), dx/np.max(amp), dy/np.max(amp), amp,
-                pivot='tail',units='width', width=.01,
-                cmap=plt.cm.coolwarm,
-                scale=10, headwidth=2, headlength=1.5)
+                pivot='tail', scale=15, width=.008,
+                cmap=plt.cm.coolwarm)
+                
+                # ,units='width', width=.1,
+                # ,
+                # scale=20, headwidth=.002, headlength=.005)
 
     plt.xlim((-15,15))
     plt.ylim((-15,15))
@@ -189,7 +196,7 @@ xx = np.meshgrid(mt_ds.xax, mt_ds.yax)
 
 plt.figure(figsize=(10, glm.NC*2))
 
-for cc in range(glm.NC):
+for cc in cids:
 
     rf = mt_ds.get_rf(wtsAll, cc)
     dx = rf['dx']
@@ -198,11 +205,9 @@ for cc in range(glm.NC):
 
     ax = plt.subplot(glm.NC,3,cc*3+1)
 
-    plt.quiver(xx[0]-np.mean(xx[0]), xx[1]-np.mean(xx[1]), dx/np.max(amp), dy/np.max(amp),
-            amp, cmap=plt.cm.coolwarm,
-            pivot='tail',units='width', width=.008,
-            scale=10, headwidth=2.5, headlength=2.5)
-
+    plt.quiver(xx[0]-np.mean(xx[0]), xx[1]-np.mean(xx[1]), dx/np.max(amp), dy/np.max(amp), amp,
+                pivot='tail', scale=15, width=.008,
+                cmap=plt.cm.coolwarm)
 
     plt.axhline(0, color='gray', )
     plt.axvline(0, color='gray')
@@ -226,47 +231,56 @@ for cc in range(glm.NC):
 
 plt.show()
 #%% Example cell
+
 # import seaborn as sns
+plt.rcParams.update({'font.size': 6})
+r2 = []
+for cc in range(glm.NC):
+    try:
+        rf = mt_ds.get_rf(wtsAll, cc)
 
-cc = 0
-rf = mt_ds.get_rf(wtsAll, cc)
+        dx = rf['dx']
+        dy = rf['dy']
+        amp = rf['amp']
 
-dx = rf['dx']
-dy = rf['dy']
-amp = rf['amp']
+        plt.figure(figsize=(2,2))
+        plt.quiver(xx[0]-np.mean(xx[0]), xx[1]-np.mean(xx[1]), dx/np.max(amp), dy/np.max(amp), amp,
+                        pivot='tail', scale=10, width=.01,
+                        cmap=plt.cm.coolwarm)
 
-plt.figure()
-plt.quiver(xx[0]-np.mean(xx[0]), xx[1]-np.mean(xx[1]), dx/np.max(amp), dy/np.max(amp),
-            amp, cmap=plt.cm.coolwarm,
-            pivot='tail',units='width', width=.008,
-            scale=15, headwidth=2.5, headlength=2.5)
+        plt.axhline(0, color='gray', linewidth=.25)
+        plt.axvline(0, color='gray', linewidth=.25)
 
+        plt.xlabel('Azimuth (d.v.a.)')
+        plt.ylabel('Elevation (d.v.a)')
+        # plt.show()
+        plt.savefig('./figures/example_spatial_{}.pdf'.format(cc))
 
-plt.axhline(0, color='gray', )
-plt.axvline(0, color='gray')
+        plt.figure(figsize=(2,2))
+        plt.plot(rf['lags'], rf['tpeak']*100, '-o', color=plt.cm.coolwarm(np.inf), ms=3)
+        plt.plot(rf['lags'], rf['tmin']*100, '-o', color=plt.cm.coolwarm(-np.inf), ms=3)
+        plt.xlabel('Lags (ms)')
+        plt.ylabel('Power (along preferred direction)')
 
-plt.xlabel('Azimuth (d.v.a.)')
-plt.ylabel('Elevation (d.v.a)')
-# plt.show()
-plt.savefig('./figures/example_spatial_{}.pdf'.format(cc))
+        plt.axhline(0, color='gray')
+        sns.despine(offset=0, trim=True)
+        # plt.show()
+        plt.savefig('./figures/example_temporal_{}.pdf'.format(cc))
 
-plt.figure()
-plt.plot(rf['lags'], rf['tpeak'], '-o', color=plt.cm.coolwarm(np.inf), ms=3)
-plt.plot(rf['lags'], rf['tmin'], '-o', color=plt.cm.coolwarm(-np.inf), ms=3)
-plt.xlabel('Lags (ms)')
-plt.ylabel('Power (along preferred direction)')
+        plt.figure(figsize=(2,2))
+        tc = mt_ds.plot_tuning_curve(cc, rf['amp'])
+        r2.append(tc['r2'])
+        plt.ylim(ymin=0)
+        sns.despine(offset=0, trim=True)
+        # plt.show()
+        plt.savefig('./figures/example_tuning_{}.pdf'.format(cc))
 
-plt.axhline(0, color='gray')
-sns.despine(offset=0, trim=True)
-# plt.show()
-plt.savefig('./figures/example_temporal_{}.pdf'.format(cc))
+        plt.show()
+    except:
+        pass
 
-plt.figure()
-tc = mt_ds.plot_tuning_curve(cc, rf['amp'])
-plt.ylim((0, 40))
-sns.despine(offset=0, trim=True)
-# plt.show()
-plt.savefig('./figures/example_tuning_{}.pdf'.format(cc))
+mu = np.mean(np.asarray(r2))
 
-plt.show()
+se = np.std(np.asarray(r2)) / np.sqrt(len(r2))
+print("mean r2 = %02.3f +- %02.3f (n=%d)" % (mu, se, len(r2)))
 # %%
