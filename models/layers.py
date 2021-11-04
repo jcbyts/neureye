@@ -1,4 +1,5 @@
 import math
+import numpy as np
 import torch
 from torch import nn
 from typing import Tuple, Union
@@ -154,8 +155,10 @@ class divNorm(nn.Module):
 
     def reset_parameters(self) -> None:
         print("divNorm: initialize weights custom")
-        nn.init.uniform_(self.weight, 0.0, 1.0)
-        nn.init.uniform_(self.bias, 0.0, 1.0)
+        self.weight.data[:] = 1.0
+        self.bias.data[:] = .5
+        # nn.init.uniform_(self.weight, 0.0, 1.0)
+        # nn.init.uniform_(self.bias, 0.0, 1.0)
 
     def forward(self, x):
 
@@ -170,3 +173,94 @@ class divNorm(nn.Module):
         x = x / xdiv.clamp_(0.001) # divide
 
         return x
+
+class STconv(nn.Module):
+    """
+    Spatiotemporal convolution layer
+    This layer takes in a spatial input and applies a convolution along the batch dimension as if it were time
+    This assumes the batch dimension is temporally contiguous and produces invalid samples at the begining, but it
+    has a smaller memory footprint.
+    """
+    def __init__(self, input_dims,
+        kernel_size = (1,10,10,10), # (C, T, W, H)
+        out_features = 10,
+        tent_spacing=None,
+        stride=1,
+        dilation=1,
+        bias=None,
+        positive_constraint=False):
+
+        super(STconv, self).__init__()
+        
+        # dims = [C x H x W ]
+        assert len(input_dims) == 3, "STconv: input must be 3D [C x H x W]. Use 1 for empty dims. Time gets created within."
+        self.input_dims = list(input_dims) + [1] # add time dim at end
+        self.num_lags = kernel_size[1]
+        self.kernel_size = kernel_size
+        self.shape = [out_features] + list(kernel_size)
+        self.positive_constraint = positive_constraint
+
+        if tent_spacing is not None:
+            from neureye.models.utils import tent_basis_generate
+            tent_basis = tent_basis_generate(np.arange(0, self.num_lags, tent_spacing))/tent_spacing
+            num_lag_params = tent_basis.shape[1]
+            self.register_buffer('tent_basis', torch.Tensor(tent_basis.T))
+            self.shape[2] = num_lag_params
+        else:
+            self.tent_basis = None
+
+        self.stride = stride
+        self.dilation = dilation
+
+        # weight needs to be NDIMS x out_features
+        self.weight = Parameter(torch.Tensor( size = self.shape ))
+
+        if bias:
+            self.bias = Parameter(torch.Tensor(out_features))
+        else:
+            self.bias = None #self.register_buffer('bias', torch.zeros(out_features))
+
+        if self.positive_constraint:
+            self.register_buffer("minval", torch.tensor(0.0))
+            self.relu = F.relu
+
+        # Do spatial padding manually (TODO: double check this)
+        self.padding = (self.shape[3]//2, (self.shape[3] - 1 + self.shape[3]%2)//2,
+            self.shape[4]//2, (self.shape[4] - 1 + self.shape[4]%2)//2,
+            self.num_lags-1-(1-tent_spacing%2), 0)
+
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        init.kaiming_uniform_(self.weight, a=5**.5)
+        if self.bias is not None:
+            fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
+            # bound = 1 / math.sqrt(fan_in)
+            bound = fan_in**-.5
+            init.uniform_(self.bias, -bound, bound)  
+
+    def forward(self, x):
+        # Reshape stim matrix LACKING temporal dimension [bcwh] 
+        # and inputs (note uses 4-d rep of tensor before combinine dims 0,3)
+        # pytorch likes 3D convolutions to be [B,C,T,W,H].
+        # I benchmarked this and it'sd a 20% speedup to put the "Time" dimension first.
+
+        w = self.weight
+        if self.positive_constraint:
+            w = torch.maximum(w, self.minval)
+
+        s = x.reshape([-1] + self.input_dims).permute(4,1,0,2,3) # [1,C,B,W,H]
+        # w = w.reshape(self.filter_dims+[-1]).permute(4,0,3,1,2) # [N,C,T,W,H] 
+        
+        # time-expand using tent-basis if it exists
+        if self.tent_basis is not None:
+            w = torch.einsum('nctwh,tz->nczwh', w, self.tent_basis)
+        y = F.conv3d(
+            F.pad(s, self.padding, "constant", 0),
+            w, 
+            bias=self.bias,
+            stride=self.stride, dilation=self.dilation)
+        
+        y = y.reshape(y.shape[1:]).permute(1,0,2,3)
+        
+        return y
