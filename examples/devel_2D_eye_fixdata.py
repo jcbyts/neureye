@@ -1,9 +1,10 @@
 #%% 
+
 import sys, os
 
 # setup paths
-iteration = 2 # which version of this tutorial to run (in case want results in different dirs)
-NBname = 'example_2D_eyetracking{}'.format(iteration)
+iteration = 1 # which version of this tutorial to run (in case want results in different dirs)
+NBname = 'test_2D_shifter{}'.format(iteration)
 
 myhost = os.uname()[1] # get name of machine
 print("Running on Computer: [%s]" %myhost)
@@ -29,7 +30,6 @@ import matplotlib.pyplot as plt  # plotting
 
 # the dataset
 import datasets.mitchell.pixel as datasets
-
 # shifter model requirements
 import neureye.models.encoders as encoders
 import neureye.models.cores as cores
@@ -38,33 +38,38 @@ import neureye.models.readouts as readouts
 import neureye.models.regularizers as regularizers
 import neureye.models.utils as ut
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 dtype = torch.float32
 
 # Where saved models and checkpoints go -- this is to be automated
 print( 'Save_dir =', dirname)
 
+
 #%% Fixation dataset
 sess_list = ['20200304'] # multiple datasets can be loaded
 stimlist = ['Gabor', 'BackImage', 'Grating', 'Dots', 'FixRsvpStim']
-num_lags = 18
+num_lags = 24
 downsample_t = 1
 
 train_ds = datasets.FixationMultiDataset(sess_list, datadir,
     requested_stims=stimlist,
     stimset='Train',
+    num_lags_pre_sac=10,
     downsample_t=downsample_t,
     max_fix_length=2000,
     saccade_basis={'max_len': 40, 'num':15},
-    num_lags = num_lags)
+    num_lags = num_lags,
+    verbose=False)
 
-test_ds = datasets.FixationMultiDataset(sess_list, datadir,
-    requested_stims=['Gabor'],
-    stimset='Test',
-    downsample_t=downsample_t,
-    max_fix_length=2000,
-    saccade_basis={'max_len': 40, 'num':15},
-    num_lags = num_lags)
+# test_ds = datasets.FixationMultiDataset(sess_list, datadir,
+#     requested_stims=['Gabor'],
+#     num_lags_pre_sac=10,
+#     stimset='Test',
+#     downsample_t=downsample_t,
+#     max_fix_length=2000,
+#     saccade_basis={'max_len': 40, 'num':15},
+#     num_lags = num_lags)
+
 
 #%% Load Gabor / Dots data to check STAS
 data = train_ds[train_ds.get_stim_indices(['Gabor', 'Dots'])]
@@ -82,7 +87,7 @@ def plot_stas(stas):
     sx -= mod2
     mu = np.zeros((NC,2))
 
-    plt.figure(figsize=(sx*2,sy*2))
+    plt.figure(figsize=(sx,sy))
     for cc in range(NC):
         w = stas[:,:,:,cc]
 
@@ -107,10 +112,10 @@ def plot_stas(stas):
         plt.subplot(sx,sy, cc*2 + 2)
         i,j=np.where(w[bestlag,:,:]==np.max(w[bestlag,:,:]))
         t1 = w[:,i[0], j[0]]
-        plt.plot(t1, '-ob')
+        plt.plot(t1, '-b')
         i,j=np.where(w[bestlag,:,:]==np.min(w[bestlag,:,:]))
         t2 = w[:,i[0], j[0]]
-        plt.plot(t2, '-or')
+        plt.plot(t2, '-r')
     
     return mu
 
@@ -140,10 +145,10 @@ plt.figure()
 plt.plot(rbase)
 plt.show()
 #%% smaller dataset to work with
+train_ds.shift = None
 data = train_ds[0:2]
 
 #%%
-
 
 import torch.nn as nn
 class STconvModel(nn.Module):
@@ -159,18 +164,29 @@ class STconvModel(nn.Module):
         super(STconvModel, self).__init__()
 
         reg_size = list(kernel_size)
-        regularizer_config = {'dims': [reg_size[1]//tent_spacing] + reg_size[2:],
+        if reg_types is not None:
+            regularizer_config = {'dims': [reg_size[1]//tent_spacing] + reg_size[2:],
                             'type': reg_types, 'amount': reg_amt}
 
-        self._input_weights_regularizer = regularizers.RegMats(**regularizer_config)
+            self._input_weights_regularizer = regularizers.RegMats(**regularizer_config)
+        else:
+            self._input_weights_regularizer = None
 
         self.features = nn.Sequential()
         layer = nn.Sequential()
-        layer.add_module('conv', nn.utils.weight_norm(layers.STconv( input_dims= input_dims,
+        # with weight norm
+        # layer.add_module('conv', nn.utils.weight_norm(layers.STconv( input_dims= input_dims,
+        #     kernel_size=kernel_size,
+        #     out_features=out_features,
+        #     tent_spacing=tent_spacing,
+        #     bias=None),
+        #     dim=0, name='weight'))
+
+        layer.add_module('conv', layers.STconv( input_dims= input_dims,
             kernel_size=kernel_size,
             out_features=out_features,
-            tent_spacing=tent_spacing),
-            dim=0, name='weight'))
+            tent_spacing=tent_spacing,
+            bias=None))
 
         layer.add_module('nonlin', layers.AdaptiveELU(0,1.0))
         layer.add_module('norm', layers.divNorm(out_features))
@@ -180,7 +196,11 @@ class STconvModel(nn.Module):
         self.outchannels = out_features
 
     def input_reg(self):
-        return self._input_weights_regularizer(self.features[0].conv.weight.squeeze())
+        if self._input_weights_regularizer is not None:
+            out = self._input_weights_regularizer(self.features[0].conv.weight.squeeze())
+        else:
+            out = 0
+        return out
 
     def regularizer(self):
         return self.input_reg()
@@ -196,14 +216,22 @@ import torch.nn as nn
 from neureye.models.losses import PoissonNLLDatFilterLoss
 
 def shifter_model(hidden_channels=16,
-    input_kern = 19):
+    input_kern = 19, modifiers=False):
+
+    # core = STconvModel(train_ds.dims,
+    #     (1,num_lags, input_kern,input_kern),
+    #     hidden_channels,
+    #     tent_spacing=2,
+    #     reg_types=["d2x", "center", "d2t"],
+    #     reg_amt=[.00005, .01, 0.000001]
+    # )
 
     core = STconvModel(train_ds.dims,
         (1,num_lags, input_kern,input_kern),
         hidden_channels,
         tent_spacing=2,
-        reg_types=["d2x", "center", "d2t"],
-        reg_amt=[.000005, .01, 0.00001]
+        reg_types=['center', 'd2xt'],
+        reg_amt=[0.0001, 0.000001]
     )
 
     lengthscale = 1.0
@@ -215,25 +243,29 @@ def shifter_model(hidden_channels=16,
     # Readout
     in_shape = [core.outchannels] + train_ds.dims[1:]
     bias = True
-    readout = readouts.Point2DGaussian(in_shape, train_ds.NC, bias, init_mu_range=0.1, init_sigma=1, batch_sample=True,
-                    gamma_l1=0,gamma_l2=0.00001,
+    readout = readouts.Point2DGaussian(in_shape, train_ds.NC, bias,
+        init_mu_range=0.1, init_sigma=1, batch_sample=True,
+                    gamma_l1=0.01,gamma_l2=0.00001,
                     align_corners=True, gauss_type='uncorrelated',
                     constrain_positive=False,
                     shifter= {'hidden_features': 20,
                             'hidden_layers': 1,
                             'final_tanh': False,
-                            'activation': "softplus",
+                            'activation': "relu",
                             'lengthscale': lengthscale}
                             )
 
-    modifiers = {'stimlist': ['saccade'],
+    if modifiers:
+        modifiers = {'stimlist': ['saccade'],
                 'gain': [data['saccade'].shape[1]],
                 'offset':[data['saccade'].shape[1]],
                 'stage': "readout",
                 'outdims': train_ds.NC}
+    else:
+        modifiers=None
 
     # combine core and readout into model
-    model = encoders.EncoderMod(core, readout, modifiers=modifiers, loss=PoissonNLLDatFilterLoss(log_input=True, reduction='mean'))
+    model = encoders.EncoderMod(core, readout, modifiers=modifiers, loss=PoissonNLLDatFilterLoss(log_input=False, reduction='mean'))
 
     # initialize readout based on spike rate and STA centers
     model.readout.bias.data = rbase
@@ -247,6 +279,7 @@ def train_model(model, save_path, version,
         learning_rate=.01, # high initial learning rate because we decay on plateau
         betas=[.9, .999],
         amsgrad=False,
+        device=None,
         early_stopping_patience=4,
         seed=None):
 
@@ -254,12 +287,35 @@ def train_model(model, save_path, version,
     # get data
     train_dl, valid_dl = ut.get_dataloaders(train_ds, batch_size=batchsize)
 
-    # optimizer
-    optimizer = torch.optim.AdamW(model.parameters(),
+    # weight decay only affects certain parameters
+    decay = []
+    weight_decay_list = ['core.features.layer0.conv.weight',
+                        'readout._features',
+                        'offsets.0.weight',
+                        'gains.0.weight']
+    decay_names = []
+    no_decay_names = []
+    no_decay = []
+    for name, m in model.named_parameters():
+        print('checking {}'.format(name))
+        if name in weight_decay_list:
+            decay.append(m)
+            decay_names.append(name)
+        else:
+            no_decay.append(m)
+            no_decay_names.append(name)
+
+    optimizer = torch.optim.AdamW([{'params': no_decay, 'weight_decay': 0}, {'params': decay, 'weight_decay': weight_decay}],
         lr=learning_rate,
         betas=betas,
-        weight_decay=weight_decay,
         amsgrad=amsgrad)
+
+    # optimizer
+    # optimizer = torch.optim.AdamW(model.parameters(),
+    #     lr=learning_rate,
+    #     betas=betas,
+    #     weight_decay=weight_decay,
+    #     amsgrad=amsgrad)
 
     earlystopping = EarlyStopping(patience=early_stopping_patience,delta=0.0)
 
@@ -268,6 +324,7 @@ def train_model(model, save_path, version,
                 dirpath=save_path,
                 optimize_graph=False,
                 scheduler=None,
+                device=device,
                 max_epochs=100,
                 version=version)
 
@@ -332,27 +389,140 @@ def shift_stim(self, im, eyepos):
 
         return im2
 
-#%% Do fitting
 
-model = shifter_model()
+#%%
+
+data = train_ds[0:2]
+
+model = shifter_model(modifiers=True)
+model.readout.shifter.layer0.linear.weight.data[:] = 0
+model.readout.shifter.layer1.linear.weight.data[:] = 0
+model.readout.shifter.layer1.linear.bias.data[:] = 0
+
+model.zero_grad()
+
+# w = model.core.features.layer0.conv.weight
+
+# x = data['stim']
+# x.requires_grad=True
+
+# yhat = model.core(x)
+# # yhat.backward()
+
 
 out = model.training_step(data)
-#%%
-for version in [7]:
+
+out['loss'].backward()
+# print(out['loss'].grad)
+
+# loss = model.loss()
     
-    model = shifter_model()
-    # model.readout.shifter.requires_grad_ = False
+#     yhat, data['robs'], data['dfs'])
+# loss.backward()
+# print(loss.grad)
 
-    save_path = os.path.join(dirname, 'jake_trainer')
+# model = models.resnet50()
+# Calculate dummy gradients
+# model.zero_grad()
+# model.core(data['stim']).mean().backward()
 
-    train_model(model, save_path, version, early_stopping_patience=10)
+#%%
+grads = []
+grad_name = []
+for name,param in model.named_parameters():
+    grads.append(param.grad.view(-1))
+    grad_name.append(name)
+
+plt.figure()
+plt.plot(torch.cat(grads))
+plt.ylim([-1e-5,1e-5])
+plt.show()
+#%%
+
+n = len(grads)
+sx = int(np.sqrt(n))
+sy = int(np.ceil(n/sx))
+plt.figure(figsize=(sx*2,sy*2))
+for i in range(n):
+    plt.subplot(sx,sy,i+1)
+    plt.plot(grads[i])
+    plt.ylim([-1e-3,1e-3])
+    plt.title(grad_name[i])
+
+plt.show()
+
+#%%
+i = n-1
+plt.figure()
+plt.plot(grads[i])
+plt.title(grad_name[i])
+plt.show()
+# grads = torch.cat(grads)
+# print(grads.shape)
+#%%
+# param = .1
+# decay = []
+# no_decay = []
+# for name, m in model.named_parameters():
+#     print('checking {}'.format(name))
+#     if 'weight' in name or 'features' in name:
+#         decay.append(m)
+#     else:
+#         no_decay.append(m)
+    
+
+# optimizer = torch.optim.RAdam([{'params': no_decay, 'weight_decay': 0}, {'params': decay, 'weight_decay': .1}], lr=2e-03, eps=1e-8)
+
+
+#%% Do fitting
+device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+
+for version in [13]:
+
+    torch.cuda.empty_cache()
+
+    model = shifter_model(modifiers=True)
+    model.readout.shifter.layer0.linear.weight.data[:] = 0
+    model.readout.shifter.layer1.linear.weight.data[:] = 0
+    model.readout.shifter.layer1.linear.bias.data[:] = 0
+
+    save_path = os.path.join(dirname, NBname)
+
+    train_model(model, save_path, version, 
+        batchsize=15,
+        weight_decay=1,
+        device=device,
+        learning_rate=0.005,
+        early_stopping_patience=5)
 
 
 #%%
-# model2 = model
-# #%% Load model after fit
-save_path = os.path.join(dirname, 'jake_trainer')
-version = 5
+model.to(torch.device('cpu'))
+yhat = model(data['stim'], shifter=data['eyepos'], sample=data)
+
+plt.figure()
+plt.imshow(yhat.detach().numpy())
+plt.show()
+
+#%% Memory debuugging 
+
+torch.cuda.memory_cached()
+torch.cuda.memory_stats()
+#%%
+# conv = deepcopy(model.core.features[0].conv)
+
+w = model.core.features[0].conv.weight.detach().cpu()
+w = w.squeeze()
+w = torch.einsum('ntwh, tz -> nzwh', w, model.core.features[0].conv.tent_basis.cpu())
+w = w.permute((1,2,3,0))
+_ = plot_stas(w.numpy())
+plt.show()
+#%%
+model2 = model
+
+#%% Load model after fit
+save_path = os.path.join(dirname, NBname)
+version = None
 outdict = ut.get_fit_versions(save_path)
 if version is None:
     version = outdict['version_num'][np.argmin(outdict['val_loss'])]
@@ -363,12 +533,9 @@ mod_path = outdict['model_file'][vind]
 
 model2 = torch.load(mod_path)
 # model2 = encoders.EncoderMod.load_from_checkpoint(modpath)
-torch.nn.utils.remove_weight_norm(model2.core.features[0].conv)
+# torch.nn.utils.remove_weight_norm(model2.core.features[0].conv)
 
-# Plot filters
-# model2.core.plot_filters()
-
-#%%
+#%% Plot filters
 w = model2.core.features[0].conv.weight.detach().cpu()
 w = w.squeeze()
 w = torch.einsum('ntwh, tz -> nzwh', w, model2.core.features[0].conv.tent_basis.cpu())
@@ -378,10 +545,16 @@ plt.show()
 
 #%% Plot shifter
 
-shifter = model2.readout.shifter.cpu()
+shifter = model.readout.shifter.cpu()
 shift = plot_shifter(shifter)
 plt.show()
 
+plt.figure()
+plt.subplot(1,2,1)
+plt.imshow(shift[0])
+plt.subplot(1,2,2)
+plt.imshow(shift[1])
+plt.show()
 
 #%% compute shift from shifter
 
@@ -396,52 +569,12 @@ data_shift = train_ds[train_ds.get_stim_indices(['Gabor', 'Dots'])]
 
 #%%
 stas1 = get_stas(data_shift['stim'], data_shift['robs'], data_shift['dfs'], num_lags*2, train_ds.dims[1:], train_ds.NC)
+
+#%%
+%matplotlib inline
 _ = plot_stas(stas1.numpy())
 plt.show()
 _ = plot_stas(stas0.numpy())
 plt.show()
 
-#%% Try loading older model fit
-save_dir='./checkpoints/v1calibration_ls{}'.format(1)
-
-save_path = os.path.join(save_dir, 'jake_trainer')
-version = None
-outdict = ut.get_fit_versions(save_path)
-if version is None:
-    version = outdict['version_num'][np.argmin(outdict['val_loss'])]
-    print("No version requested. Best version is %d" %version)
-
-vind = np.where(np.asarray(outdict['version_num']) == version)[0][0]
-mod_path = outdict['model_file'][vind]
-
-model2 = torch.load(mod_path)
-# model2 = encoders.EncoderMod.load_from_checkpoint(modpath)
-torch.nn.utils.remove_weight_norm(model2.core.features[0].conv)
-
-# Plot filters
-model2.core.plot_filters()
-plt.show()
-
-# %% reload data with shifter
-data_path='/home/jake/Datasets/Mitchell/stim_movies/'
-gd_shift = datasets.PixelDataset(sess_list[0], stims=['Gabor', 'Dots'],
-    stimset="Train", num_lags=num_lags,
-    downsample_t=2,
-    downsample_s=1,
-    valid_eye_rad=5.2,
-    dirname=data_path,
-    shifter=shifter,    
-    dim_order='txy',
-    include_eyepos=True,
-    flatten=False,  # flattens data, False for this model
-    download=False, # download dataset from server if not already downloaded
-    temporal=False, # flag for backwards compatiability (must be false)
-    preload=False) # turn preload on to speed up fitting (requires lots of CPU memory)
-
-#%% compute STAs with shifted stimulus
-index = np.where(gd_shift.stim_indices==0)[0]
-sta_shift = get_stas(gd_shift, index)
-
-#%% Plot STAS
-mu = plot_stas(sta_shift)
 # %%
