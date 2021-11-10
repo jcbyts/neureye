@@ -30,29 +30,27 @@ import matplotlib.pyplot as plt  # plotting
 
 # the dataset
 import datasets.mitchell.pixel as datasets
-# shifter model requirements
-import neureye.models.encoders as encoders
-import neureye.models.cores as cores
+
 import neureye.models.layers as layers
-import neureye.models.readouts as readouts
-import neureye.models.regularizers as regularizers
-import neureye.models.utils as ut
 
-device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
-dtype = torch.float32
-
-# Where saved models and checkpoints go -- this is to be automated
-print( 'Save_dir =', dirname)
 
 #%%
-# PATH_DATASETS = os.environ.get("PATH_DATASETS", ".")
-# AVAIL_GPUS = min(1, torch.cuda.device_count())
-# BATCH_SIZE = 256 if AVAIL_GPUS else 64
-# NUM_WORKERS = int(os.cpu_count() / 2)
+
+
+# %%
+# import neureye.models.readouts as readouts
+# import neureye.models.regularizers as regularizers
+# import neureye.models.utils as ut
+
+# device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# dtype = torch.float32
+
+# # Where saved models and checkpoints go -- this is to be automated
+# print( 'Save_dir =', dirname)
 
 #%% Fixation dataset
 sess_list = ['20200304'] # multiple datasets can be loaded
-stimlist = ['Gabor', 'BackImage', 'Grating', 'Dots', 'FixRsvpStim']
+stimlist = ['Gabor'] #, 'BackImage', 'Grating', 'Dots', 'FixRsvpStim']
 num_lags = 24
 downsample_t = 1
 
@@ -64,7 +62,7 @@ train_ds = datasets.FixationMultiDataset(sess_list, datadir,
     max_fix_length=200,
     saccade_basis={'max_len': 40, 'num':15},
     num_lags = num_lags,
-    add_noise=0,
+    add_noise=5,
     verbose=False)
 
 # test_ds = datasets.FixationMultiDataset(sess_list, datadir,
@@ -75,7 +73,53 @@ train_ds = datasets.FixationMultiDataset(sess_list, datadir,
 #     max_fix_length=2000,
 #     saccade_basis={'max_len': 40, 'num':15},
 #     num_lags = num_lags)
+#%%
+import importlib
+importlib.reload(layers.layers)
+importlib.reload(layers)
 
+#%%
+
+
+
+#%%
+
+import torch.nn as nn
+# import neureye.models.layers.layers as layers
+class MyModel(nn.Module):
+
+    def __init__(self, input_dims, num_filters, filter_dims, num_outputs):
+
+        super(MyModel, self).__init__()
+
+        self.layer1 = layers.STconvLayer(input_dims, num_filters,
+                filter_dims, NLtype='elu', norm_type=1, reg_vals={'d2xt':0.01, 'l1':0.01})
+        self.layer2 = layers.DivNormLayer(self.layer1.output_dims)
+        self.readout = layers.ReadoutLayer(self.layer2.output_dims, num_outputs)
+    
+    def forward(self, x):
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.readout(x)
+
+        return x
+
+
+#%%
+
+input_dims = train_ds.dims + [train_ds.num_lags]
+num_filters = 10
+filter_dims = [19, 19, train_ds.num_lags]
+num_outputs = 35
+
+shifter = MyModel(input_dims, num_filters, filter_dims, num_outputs)
+
+#%%
+data = train_ds[0]
+
+yhat = shifter(data['stim'])
+
+print(yhat.shape)
 
 #%% Load Gabor / Dots data to check STAS
 data = train_ds[train_ds.get_stim_indices(['Gabor', 'Dots'])]
@@ -195,7 +239,6 @@ class STconvModel(nn.Module):
             bias=None))
 
         layer.add_module('nonlin', layers.AdaptiveELU(0,1.0))
-        layer.add_module('bnorm', nn.BatchNorm2d(out_features))
         layer.add_module('norm', layers.divNorm(out_features))
 
         self.features.add_module("layer0", layer)
@@ -215,7 +258,69 @@ class STconvModel(nn.Module):
     def forward(self, x):
         return self.features(x)
 
+class STconvModel2(nn.Module):
+    
+    def __init__(
+        self,
+        input_dims,
+        kernel_size,
+        out_features,
+        tent_spacing=1,
+        ):
 
+        super(STconvModel2, self).__init__()
+
+       
+        self._input_weights_regularizer = None
+        self.features = nn.Sequential()
+        layer = nn.Sequential()
+
+        layer.add_module('conv', layers.STconv( input_dims= input_dims,
+            kernel_size=kernel_size,
+            out_features=out_features,
+            tent_spacing=tent_spacing,
+            bias=None))
+
+        layer.add_module('nonlin', nn.ReLU(inplace=True))
+        layer.add_module('norm', nn.BatchNorm2d(out_features))
+
+        self.features.add_module("layer0", layer)
+
+        layer = nn.Sequential()
+        layer.add_module('conv', nn.Conv2d(out_features, out_features, kernel_size=5, padding=5//2, bias=False))
+        layer.add_module('nonlin', nn.ReLU(inplace=True))
+        layer.add_module('norm', nn.BatchNorm2d(out_features))
+        self.features.add_module("layer1", layer)
+        self.hidden_channels = out_features
+
+    @property
+    def outchannels(self):
+        ret = len(self.features) * self.hidden_channels
+
+        return ret
+        
+    def regularizer(self):
+        return 0
+
+    def forward(self, x):
+        ret = []
+
+        for num,layer in enumerate(self.features):
+            # print("layer {}".format(num))
+            x = layer(x)
+            ret.append(x)
+
+        return torch.cat(ret, dim=1)
+#%%
+# 
+input_kern = 19
+hidden_channels = 12
+core = STconvModel2(train_ds.dims,
+        (1,num_lags, input_kern,input_kern),
+        hidden_channels,
+        tent_spacing=2)
+
+yhat = core(data['stim'])
 #%% build model
 from neureye.models.trainers import Trainer, EarlyStopping
 import torch.nn as nn
@@ -224,13 +329,19 @@ from neureye.models.losses import PoissonNLLDatFilterLoss
 def shifter_model(hidden_channels=16,
     input_kern = 19, modifiers=False):
 
-    core = STconvModel(train_ds.dims,
+    # core = STconvModel(train_ds.dims,
+    #     (1,num_lags, input_kern,input_kern),
+    #     hidden_channels,
+    #     tent_spacing=2,
+    #     reg_types=['center', 'd2xt'],
+    #     reg_amt=[0.0001, 0.0001]
+    # )
+
+    core = STconvModel2(train_ds.dims,
         (1,num_lags, input_kern,input_kern),
         hidden_channels,
-        tent_spacing=2,
-        reg_types=['center', 'd2xt'],
-        reg_amt=[0.001, 0.000001]
-    )
+        tent_spacing=2)
+
 
     lengthscale = 1.0
 
@@ -283,16 +394,22 @@ def train_model(model, save_path, version,
 
     import time
     # get data
-    train_dl, valid_dl = ut.get_dataloaders(train_ds, batch_size=batchsize)
+    if train_ds.add_noise > 0:
+        replacement = True
+    else:
+        replacement = False
+
+    train_dl, valid_dl = ut.get_dataloaders(train_ds, batch_size=batchsize, replacement=replacement)
 
     # weight decay only affects certain parameters
     decay = []
     weight_decay_list = ['core.features.layer0.conv.weight',
+                        'core.features.layer1.conv.weight'
                         'readout._features',
                         'offsets.0.weight',
-                        'gains.0.weight',
-                        'readout.shifter.layer0.linear.weight',
-                        'readout.shifter.layer1.linear.weight']
+                        'gains.0.weight']
+                        #                         'readout.shifter.layer0.linear.weight',
+                        # 'readout.shifter.layer1.linear.weight'
     decay_names = []
     no_decay_names = []
     no_decay = []
@@ -402,7 +519,7 @@ def shift_stim(self, im, eyepos):
 #%%
 
 data = train_ds[0:2]
-version = 19
+version = 18
 
 model = shifter_model(modifiers=True)
 
@@ -410,10 +527,10 @@ save_path = os.path.join(dirname, NBname)
 
 train_model(model, save_path, version, 
         batchsize=25,
-        weight_decay=.1,
+        weight_decay=.5,
         device=device,
         learning_rate=0.001,
-        early_stopping_patience=5)
+        early_stopping_patience=10)
 
 
 #%%

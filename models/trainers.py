@@ -130,12 +130,18 @@ class Trainer:
         
         # scheduler defaults
         self.step_scheduler_after = 'epoch' # this is the only option for now
-        self.step_scheduler_metric = None
+        self.step_scheduler_metric = 'val_loss'
 
 
-    def fit(self, model, train_loader, val_loader, seed=None):
+    def fit(self,
+        model, train_loader, val_loader,
+        seed=None,
+        log_activations=None):
         
         self.model = model # can we just assign this here? --> makes it look more like the way lightning trainer is called (with model passed into fit)
+
+        if log_activations is not None:
+            self.log_activations = log_activations
 
         GPU_FLAG = torch.cuda.is_available()
         GPU_USED = self.device.type == 'cuda'
@@ -181,19 +187,19 @@ class Trainer:
             return
 
         self.graceful_exit()
-    
+
     def fit_loop(self, epochs, train_loader, val_loader):
         # main loop for training
         for epoch in range(epochs):
             self.epoch = epoch
             # train one epoch
             out = self.train_one_epoch(train_loader, epoch)
-            self.logger.add_scalar('Loss/Train (Epoch)', out['train_loss'].item(), epoch)
+            self.logger.add_scalar('Loss/Train (Epoch)', out['train_loss'], epoch)
 
             # validate every epoch
             if epoch % 1 == 0:
                 out = self.validate_one_epoch(val_loader)
-                self.val_loss_min = out['val_loss'].item()
+                self.val_loss_min = out['val_loss']
                 self.logger.add_scalar('Loss/Validation (Epoch)', self.val_loss_min, epoch)
             
             # scheduler if scheduler steps at epoch level
@@ -201,9 +207,8 @@ class Trainer:
                 if self.step_scheduler_after == "epoch":
                     if self.step_scheduler_metric is None:
                         self.scheduler.step()
-                    else:
-                        step_metric = self.name_to_metric(self.step_scheduler_metric)
-                        self.scheduler.step(step_metric)
+                    elif self.step_scheduler_metric == "val_loss":
+                        self.scheduler.step(self.val_loss_min)
             
             # checkpoint
             self.checkpoint_model(epoch)
@@ -226,10 +231,11 @@ class Trainer:
         pbar.set_description("Validating ver=%d" %self.version)
         with torch.no_grad():
             for data in pbar:
+                torch.cuda.empty_cache()
                 
                 # Data to device if it's not already there
                 for dsub in data:
-                    if data[dsub].device != self.device:
+                    if data[dsub].device != next(self.model.parameters()).device:
                         data[dsub] = data[dsub].to(self.device)
                 
                 if isinstance(self.model, nn.DataParallel):
@@ -237,14 +243,14 @@ class Trainer:
                 else:
                     out = self.model.validation_step(data)
 
-                runningloss += out['val_loss']/nsteps
-                pbar.set_postfix({'val_loss': runningloss.item()})
+                runningloss += out['val_loss'].detach().item()/nsteps
+                pbar.set_postfix({'val_loss': runningloss})
 
         return {'val_loss': runningloss}
             
     def train_one_epoch(self, train_loader, epoch=0):
         # train for one epoch
-        
+
         self.model.train() # set model to training mode
 
         runningloss = 0
@@ -252,39 +258,39 @@ class Trainer:
         pbar = tqdm(train_loader, total=nsteps, bar_format=None) # progress bar for looping over data
         pbar.set_description("Epoch %i" %epoch)
         for data in pbar:
-            # Data to device if it's not already there
-            moved_to_device = False
-            for dsub in data:
-                if data[dsub].device != self.device:
-                    moved_to_device = True
-                    data[dsub] = data[dsub].to(self.device)
             
             # handle optimization step
             if isinstance(self.optimizer, torch.optim.LBFGS):
                 out = self.train_lbfgs_step(data)
             else:
                 out = self.train_one_step(data)
-            
-            # Move Data off device
-            if moved_to_device:
-                for dsub in data:
-                    data[dsub] = data[dsub].to('cpu')
 
             self.n_iter += 1
-            self.logger.add_scalar('Loss/Train', out['train_loss'].item(), self.n_iter)
+            self.logger.add_scalar('Loss/Train', out['train_loss'], self.n_iter)
 
             runningloss += out['train_loss']/nsteps
             # update progress bar
-            pbar.set_postfix({'train_loss': runningloss.item()})
+            pbar.set_postfix({'train_loss': runningloss})
         
         return {'train_loss': runningloss} # should this be an aggregate out?
 
     def train_lbfgs_step(self, data):
+        
+        
+        try:
+            for dsub in data:
+                if data[dsub].device != next(self.model.parameters()).device:
+                    data[dsub] = data[dsub].to(self.device)
+        except:
+            print("Error in moving data to device")
+            raise
+
         # # Version 1: This version is based on the torch.optim.lbfgs implementation
         self.optimizer.zero_grad()
 
         def closure():
-            self.optimizer.zero_grad()
+            if torch.is_grad_enabled():
+                self.optimizer.zero_grad()
             
             with torch.set_grad_enabled(True):
                 out = self.model.training_step(data)
@@ -299,21 +305,38 @@ class Trainer:
         # calculate the loss again for monitoring
         loss = closure()
     
-        return {'train_loss': loss}
+        return {'train_loss': loss.detach().item()}
 
 
     def train_one_step(self, data):
 
-        self.optimizer.zero_grad() # zero the gradients
-        if isinstance(self.model, nn.DataParallel):
-            out = self.model.module.training_step(data)
-        else:
-            out = self.model.training_step(data)
+        torch.cuda.empty_cache()
 
-        loss = out['loss']
+        try:
+            for dsub in data:
+                if data[dsub].device != next(self.model.parameters()).device:
+                    data[dsub] = data[dsub].to(self.device)
+        except:
+            print("Error in moving data to device")
+            raise
+
+        self.optimizer.zero_grad() # zero the gradients
+        
+
         with torch.set_grad_enabled(True):
+            if isinstance(self.model, nn.DataParallel):
+                out = self.model.module.training_step(data)
+            else:
+                out = self.model.training_step(data)
+
+            loss = out['loss']
             loss.backward()
             self.optimizer.step()
+            
+            for key in out.keys():
+                out[key] = out[key].detach()
+
+            loss = loss.item()
             
         if self.scheduler:
             if self.step_scheduler_after == "batch":
@@ -322,10 +345,14 @@ class Trainer:
                 else:
                     step_metric = self.name_to_metric(self.step_scheduler_metric)
                     self.scheduler.step(step_metric)
-        
+
         return {'train_loss': loss}
     
     def checkpoint_model(self, epoch=None):
+        print("checkpointing model")
+        # if not isinstance(self.model, nn.DataParallel):
+        #     self.model.to(torch.device('cpu'))
+
         if isinstance(self.model, nn.DataParallel):
             state = self.model.module.state_dict()
         else:
@@ -350,6 +377,10 @@ class Trainer:
 
         if isinstance(self.model, nn.DataParallel):
             self.model = self.model.module # get the non-data-parallel model
+        
+        if self.device.type == 'cuda':
+            self.model.cpu()
+            torch.cuda.empty_cache()
 
         self.model.eval()
 
