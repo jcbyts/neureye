@@ -1,2 +1,2 @@
-from .utils.display import animshow
-from .regularizers import *
+# from .utils.display import animshow
+# from .regularizers import *

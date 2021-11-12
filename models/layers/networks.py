@@ -3,8 +3,8 @@ import torch
 from torch import nn
 
 from copy import deepcopy
-#from .regularization import reg_setup_ffnet
-import layers
+
+import neureye.models.layers as layers
 
 LayerTypes = {
     'normal': layers.NDNLayer,
@@ -17,55 +17,37 @@ LayerTypes = {
 }
 
 _valid_ffnet_types = ['normal', 'add', 'mult', 'readout']
-
-class network(nn.Module):
-    """
-    Base class for all networks (FFNetwork, ReadoutNetwork, etc.)
-    
-    """
+      
+class FFnetwork(nn.Module):
 
     def __init__(self,
-        xstim_n='stim',
-        **kwargs,
-        ):
+            ffnet_type: str = 'normal',
+            layer_list: list = None,
+            layer_types: list = None,
+            xstim_n: str = 'stim',
+            ffnet_n: list = None,
+            input_dims_list: list = None,
+            reg_list: list = None,
+            scaffold_levels: list = None,
+            **kwargs,
+            ):
 
-        self.xstim_n = xstim_n
-        self.layers = []
-    
-    def prepare_regularization(self):
-        """Makes regularization modules for training"""
-        for layer in self.layers:
-            layer.reg.build_reg_modules()
-    
-    def compute_reg_loss(self):
-        rloss = 0
-        for layer in self.layers:
-            rloss += layer.compute_reg_loss()
-        return rloss
-
-
-class FFnetwork(network):
-
-    def __init__(self, ffnet_params):
-        """ffnet_params is a dictionary constructed by other utility functions
-        reg_params is a dictionary of reg type and list of values for each layer,
-        i.e., {'d2xt':[None, 0.2], 'l1':[1e-4,None]}"""
+        if len(kwargs) > 0:
+            print("FFnet: unknown kwargs:", kwargs)
 
         super(FFnetwork, self).__init__()
         
-        self.network_type = ffnet_params['ffnet_type']
+        self.network_type = ffnet_type
+        print("FFnet: network type:", self.network_type)
         assert self.network_type in _valid_ffnet_types, "ffnet_type " + self.network_type + " is unknown."
 
         # Format and record inputs into ffnet
-        self.layer_list = deepcopy(ffnet_params['layer_list'])
-        self.layer_types = deepcopy(ffnet_params['layer_types'])
-        self.xstim_n = ffnet_params['xstim_n']
-        self.ffnets_in = deepcopy(ffnet_params['ffnet_n'])
-        #if self.network_type == 'mult': 
-        #    assert len(self.ffnets_in) == 2, 'mult ffnetwork must receive two input networks.'  
+        self.layer_list = deepcopy(layer_list)
+        self.layer_types = deepcopy(layer_types)
+        self.xstim_n = xstim_n
+        self.ffnets_in = ffnet_n
 
-        assert self.determine_input_dims(ffnet_params['input_dims_list'], ffnet_type=ffnet_params['ffnet_type']), 'Invalid network inputs.'
-        #self.conv = ffnet_params['conv']    # I don't think this does anything
+        assert self.determine_input_dims(input_dims_list, ffnet_type=ffnet_type), 'Invalid network inputs.'
 
         num_layers = len(self.layer_list)
 
@@ -74,18 +56,29 @@ class FFnetwork(network):
             self.layer_list[0]['input_dims'] = self.input_dims
 
         # Process regularization into layer-specific list. Will save at this level too
-        
-        reg_params = self.__reg_setup_ffnet( ffnet_params['reg_list'] )
-        # can be saved, but difficult to update. just save reg vals within layers
+        reg_params = self.__reg_setup_ffnet( reg_list )
 
         # Make each layer as part of an array
         self.layers = nn.ModuleList()
         for ll in range(num_layers):
-            layer_type = self.layer_types
             self.layers.append(
-                LayerTypes[self.layer_types[ll]](self.layer_list[ll], reg_vals=reg_params[ll]) )
+                LayerTypes[self.layer_types[ll]](**self.layer_list[ll], reg_vals=reg_params[ll]) )
+
+        # Make scaffold output if requested
+        if scaffold_levels is None:
+            self.scaffold_levels = [-1] # output last layer only
+        else: # output specified layers concatenated together
+            self.scaffold_levels = [*range(self.layers)[scaffold_levels:]] if isinstance(scaffold_levels, int) else scaffold_levels
     # END FFnetwork.__init__
  
+    @property
+    def num_outputs(self):
+        n = 0
+        for i in self.scaffold_levels:
+            n += self.layers[i].output_dims
+        return n
+
+
     def determine_input_dims( self, input_dims_list, ffnet_type='normal' ):
         """
         Sets input_dims given network inputs. Can be overloaded depending on the network type. For this base class, there
@@ -130,8 +123,10 @@ class FFnetwork(network):
         return valid_input_dims
     # END FFnetwork.determine_input_dims
 
-    def forward(self, inputs):
-
+    def preprocess_input(self, inputs):
+        """
+        Preprocess input to network.
+        """
         # Combine network inputs (if relevant)
         if isinstance(inputs, list):
             x = inputs[0]
@@ -144,11 +139,22 @@ class FFnetwork(network):
                     x = torch.mult( x, torch.add(inputs[mm], 1.0) )
         else:
             x = inputs
+        
+        return x
 
-        # Process through layers
+    def forward(self, inputs):
+        if self.layers is None:
+            raise ValueError("FFnet: no layers defined.")
+        
+        out = [] # returned 
+
+        x = self.preprocess_input(inputs)
+
         for layer in self.layers:
             x = layer(x)
-        return x
+            out.append(x)
+        
+        return torch.cat([out[ind] for ind in self.scaffold_levels], dim=1)
     
     def __reg_setup_ffnet(self, reg_params=None):
         # Set all default values to none
@@ -170,10 +176,14 @@ class FFnetwork(network):
         return layer_reg_list
 
     def prepare_regularization(self):
-        """Makes regularization modules for training"""
+        """
+        Makes regularization modules with current requested values.
+        This is done immediately before training, because it can change during training and tuning.
+        """
         for layer in self.layers:
-            layer.reg.build_reg_modules()
-
+            if 'reg' in layer.__dict__:
+                layer.reg.build_reg_modules()
+            
     def compute_reg_loss(self):
         rloss = 0
         for layer in self.layers:
@@ -238,17 +248,16 @@ class ReadoutNetwork(FFnetwork):
         s += self.__class__.__name__
         return s
 
-    def __init__(self, ffnet_params):
+    def __init__(self, **kwargs):
         """
         This essentially used the constructor for Point1DGaussian, with dicationary input.
         Currently there is no extra code required at the network level. I think the constructor
         can be left off entirely, but leaving in in case want to add something.
         """
-        super(ReadoutNetwork, self).__init__(ffnet_params)
+        super(ReadoutNetwork, self).__init__(**kwargs)
         self.network_type = 'readout'
-    # END ReadoutNetwork.__init__
 
-    def determine_input_dims( self, input_dims_list, ffnet_type='readout' ):
+    def determine_input_dims( self, input_dims_list, **kwargs):
         """
         Sets input_dims given network inputs. Can be overloaded depending on the network type. For this base class, there
         are two types of network input: external stimulus (xstim_n) or a list of internal (ffnet_in) networks:
@@ -303,19 +312,22 @@ class FFnet_external(FFnetwork):
     #    s = super().__repr__()
     #    # Add information about module to print out
 
-    def __init__(self, ffnet_params, external_module_dict):
+    def __init__(self, external_module_dict=None, external_module_name=None, input_dims_reshape=None, **kwargs):
 
         # The parent construct will make a 'dummy layer' that will be filled in with module 0 below
-        super(FFnet_external, self).__init__(ffnet_params)
+        super(FFnet_external, self).__init__(**kwargs)
         self.network_type = 'external'
 
         # Extract relevant network fom extenal_module_dict using the ffnet_params['layer_types']
-        net_name = ffnet_params['external_module_name']
+        assert external_module_dict is not None, 'external_module_dict cannot be None.'
+        
+        net_name = external_module_name
         assert net_name in external_module_dict, 'External network %s not found in external_modules dict.'%net_name
 
         # This network will be made to be a layer (so the ffnet forward is the layer forward). Now place external network here
         self.layers[0].external_network = external_module_dict[net_name]
-        self.input_dims_reshape = ffnet_params['input_dims_reshape']
+        assert input_dims_reshape is not None, 'input_dims_reshape cannot be None. Jake did not know what it is supposed to default to so he used None.'
+        self.input_dims_reshape = input_dims_reshape
     # END FFnet_external.__init__
 
     def forward(self, inputs):

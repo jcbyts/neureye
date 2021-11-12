@@ -11,23 +11,41 @@ class NDN(nn.Module):
     def __init__(self,
         ffnet_list=None,
         opt_params=None,
+        ffnet_out=None,
         model_name='NDN_model',
         data_dir='./checkpoints',
         **kwargs):
 
-        super(NDN, self).__init__(**kwargs)
+        super(NDN, self).__init__()
 
         self.hparams = save_hyperparameters() # hyper parameters will get logged
 
         if ffnet_list is not None:
             self.networks = assemble_ffnetworks(ffnet_list)
+        else:
+            self.networks = None
 
         self.model_name = model_name
         self.data_dir = data_dir
+
+        # Check and record output of network
+        if (ffnet_out is None) or (ffnet_out == -1):
+            ffnet_out = len(ffnet_list)-1
+
+        if not isinstance(ffnet_out, list):
+            ffnet_out = [ffnet_out]
+        
+        for ii in range(len(ffnet_out)):
+            if ffnet_out[ii] == -1:
+                ffnet_out[ii] = len(self.networks)-1
+                
+        self.ffnet_out = ffnet_out
+        
+        self.configure_loss()
         
     def configure_loss(self):
-        # Loss function
-        self.loss = losses.PoissonNLLDatFilterLoss(self.hparams)
+        # Loss function defaults to Poisson loss with data filters (requires dfs field in dataset batch)
+        self.loss = losses.PoissonNLLDatFilterLoss(log_input=False)
         self.val_loss = self.loss
 
     def configure_optimizers(self, opt_params=None):
@@ -94,7 +112,7 @@ class NDN(nn.Module):
         Note this could return net_ins and net_outs, but currently just saving net_outs (no reason for net_ins yet
         
         """
-        assert 'networks' in self.__dict__.keys(), "No networks defined in this NDN"
+        assert 'networks' in dir(self), "compute_network_outputs: No networks defined in this NDN"
 
         net_ins, net_outs = [], []
         for ii in range(len(self.networks)):
@@ -109,12 +127,6 @@ class NDN(nn.Module):
                 for mm in range(len(in_nets)):
                     inputs.append( net_outs[in_nets[mm]] )
 
-                # This would automatically  concatenate, which will be FFnetwork-specfic instead (and handled in FFnetwork)
-                #input_cat = net_outs[in_nets[0]]
-                #for mm in range(1, len(in_nets)):
-                #    input_cat = torch.cat( (input_cat, net_outs[in_nets[mm]]), 1 )
-
-                #net_ins.append( inputs )
                 net_outs.append( self.networks[ii](inputs) ) 
         return net_ins, net_outs
     # END compute_network_outputs
@@ -477,7 +489,7 @@ class NDN(nn.Module):
 
     def list_parameters(self, ffnet_target=None, layer_target=None):
         if ffnet_target is None:
-            ffnet_target = np.arange(len(self.networks), dtype='int32')
+            ffnet_target = list(range(len(self.networks)))
         elif not isinstance(ffnet_target, list):
             ffnet_target = [ffnet_target]
         for ii in ffnet_target:
@@ -488,7 +500,7 @@ class NDN(nn.Module):
     def set_parameters(self, ffnet_target=None, layer_target=None, name=None, val=None ):
         """Set parameters for listed layer or for all layers."""
         if ffnet_target is None:
-            ffnet_target = np.arange(len(self.networks), dtype='int32')
+            ffnet_target = list(range(len(self.networks)))
         elif not isinstance(ffnet_target, list):
             ffnet_target = [ffnet_target]
         for ii in ffnet_target:
@@ -518,28 +530,6 @@ class NDN(nn.Module):
 
         with open(fn, 'wb') as f:
             dill.dump(self, f)
-
-    def get_null_adjusted_ll(self, sample, bits=False):
-        '''
-        get null-adjusted log likelihood
-        bits=True will return in units of bits/spike
-        '''
-        m0 = self.cpu()
-        if self.loss_type == 'poisson':
-            #loss = nn.PoissonNLLLoss(log_input=False, reduction='none')
-            loss = self.loss_module.lossNR
-        else:
-            print('Whatever loss function you want is not yet here.')
-        
-        lnull = -loss(torch.ones(sample['robs'].shape)*sample['robs'].mean(axis=0), sample['robs']).detach().cpu().numpy().sum(axis=0)
-        #yhat = m0(sample['stim'], shifter=sample['eyepos'])
-        yhat = m0(sample)
-        llneuron = -loss(yhat,sample['robs']).detach().cpu().numpy().sum(axis=0)
-        rbar = sample['robs'].sum(axis=0).numpy()
-        ll = (llneuron - lnull)/rbar
-        if bits:
-            ll/=np.log(2)
-        return ll
     
     def get_activations(self, sample, ffnet_target=0, layer_target=0, NL=False):
         """
@@ -593,46 +583,13 @@ class NDN(nn.Module):
 
         out = get_fit_versions(checkpoint_path, model_name)
         if version is None:
-            version = out['version_num'][np.argmax(np.asarray(out['val_loss']))]
+            ver_ix = [id for id in range(len(out['val_loss'])) if out['val_loss'][id] is max(out['val_loss'])][0]
+            version = out['version_num'][ver_ix]
             print("No version requested. Using (best) version (v=%d)" %version)
 
         assert version in out['version_num'], "Version %d not found in %s. Must be: %s" %(version, checkpoint_path, str(out['version_num']))
-        ver_ix = np.where(version==np.asarray(out['version_num']))[0][0]
+        ver_ix = [id for id in range(len(out['version_num'])) if out['version_num'][id] is version][0]
         # Load the model
         model = torch.load(out['model_file'][ver_ix])
         
         return model
-
-        # import os
-        # import dill
-        # if alt_dirname is None:
-        #     fn = './checkpoints/'
-        # else:
-        #     fn = alt_dirname
-        #     if alt_dirname != '/':
-        #         fn += '/'
-        # if filename is None:
-        #     assert model_name is not None, 'Need model_name or filename.'
-        #     fn += model_name + '.pkl'
-        # else :
-        #     fn += filename
-
-        # if not os.path.isfile(fn):
-        #     raise ValueError(str('%s is not a valid filename' %fn))
-
-        # print( 'Loading model:', fn)
-        # with open(fn, 'rb') as f:
-        #     model = dill.load(f)
-        # model.encoder = None
-        # if version is not None:
-        #     from pathlib import Path
-        #     assert filename is None, 'Must recover version from checkpoint dir.'
-        #     # Then load checkpointed encoder on top of model
-        #     chkpntdir = fn[:-4] + '/version_' + str(version) + '/'
-        #     chkpath = Path(chkpntdir) / 'checkpoints'
-        #     ckpt_files = list(chkpath.glob('*.ckpt'))
-        #     model.encoder = Encoder.load_from_checkpoint(str(ckpt_files[0]))
-        #     nn.utils.remove_weight_norm(model.encoder.core.features.layer0.conv)
-        #     print( '-> Updated with', str(ckpt_files[0]))
-
-        # return model

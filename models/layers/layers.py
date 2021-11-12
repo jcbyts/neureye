@@ -57,22 +57,26 @@ class NDNLayer(nn.Module):
     preprocess_weights() applies positive constraint and normalization if requested
     compute_reg_loss() computes the regularization loss for the regularization specified in reg_vals
 
-    
-
     """
-    def __init__(self, input_dims,
-            num_filters,
+    def __init__(self, input_dims=None,
+            num_filters=None,
             filter_dims=None,
             NLtype:str='lin',
             norm_type:int=0,
             pos_constraint=False,
             num_inh:int=0,
             bias:bool=False,
-            weight_init:str='xavier_uniform',
-            bias_init:str='zeros',
+            weights_initializer:str='xavier_uniform',
+            bias_initializer:str='zeros',
             reg_vals:dict=None,
             **kwargs,
             ):
+
+        assert input_dims is not None, "NDNLayer: Must specify input_dims"
+        assert num_filters is not None, "NDNLayer: Must specify num_filters"
+
+        if len(kwargs) > 0:
+            print("NDNLayer: unknown kwargs:", kwargs)
 
         super(NDNLayer, self).__init__()
         self.input_dims = input_dims
@@ -118,7 +122,7 @@ class NDNLayer(nn.Module):
             self.register_buffer('ei_mask', torch.ones(self.num_filters))  
             self.ei_mask[-(num_inh+1):0] = -1
 
-        self.reset_parameters( weight_init, bias_init )
+        self.reset_parameters( weights_initializer, bias_initializer )
 
     def reset_parameters(self, weights_initializer=None, bias_initializer=None, param=None) -> None:
         '''
@@ -222,8 +226,11 @@ class NDNLayer(nn.Module):
                 print("      NOT FIT: %s:"%nm, pp.size())
 
     def set_parameters(self, name=None, val=None ):
-        """Turn fitting for named params on or off. If name is none, do for whole layer."""
-        assert isinstance(val, bool), 'val must be set.'
+        """
+        Turn fitting for named params on or off.
+        If name is none, do for whole layer.
+        """
+        assert isinstance(val, bool), 'val must be a boolean (True or False).'
         for nm, pp in self.named_parameters(recurse=False):
             if name is None:
                 pp.requires_grad = val
@@ -231,6 +238,14 @@ class NDNLayer(nn.Module):
                 pp.requires_grad = val
 
     def plot_filters( self, cmaps='gray', num_cols=8, row_height=2, time_reverse=True):
+        """
+        Plot the filters in the layer.
+        Args:
+            cmaps: str or colormap, colormap to use for plotting
+            num_cols: int, number of columns to use in plot
+            row_height: int, number of rows to use in plot
+            time_reverse: bool, whether to reverse the time dimension
+        """
         ws = self.get_weights(time_reverse=time_reverse)
         # check if 1d: otherwise return error for now
         num_filters = ws.shape[-1]
@@ -267,27 +282,35 @@ class ConvLayer(NDNLayer):
         NLtype: str, 'lin', 'relu', 'tanh', 'sigmoid', 'elu', 'none'
 
     """
-    def __init__(self, input_dims,
-            num_filters,
-            conv_width,
+    def __init__(self,
+            input_dims=None,
+            num_filters=None,
+            conv_dims=None,
+            filter_dims=None,
             stride=None,
             dilation=1,
             **kwargs,
             ):
 
-        if conv_width is None:
-            TypeError( 'Need to define conv filter-width.')
-        elif isinstance(conv_width, int):
-            filter_dims = [input_dims[0], conv_width, conv_width, input_dims[3]]
-        elif isinstance(conv_width, list):
-            if len(conv_width) == 1:
-                filter_dims = [input_dims[0], conv_width[0], conv_width[0], input_dims[3]]
-            elif len(conv_width) == 2:
-                filter_dims = [input_dims[0], conv_width[0], conv_width[1], input_dims[3]]
-            elif len(conv_width) == 3:
-                filter_dims = [input_dims[0], conv_width[0], conv_width[1], conv_width[2]]
-            else:
-                raise ValueError('conv_width must be int or list of length 1, 2, or 3.')
+        assert input_dims is not None, "ConvLayer: Must specify input_dims"
+        assert num_filters is not None, "ConvLayer: Must specify num_filters"
+        assert (conv_dims is not None) or (filter_dims is not None), "ConvLayer: conv_dims or filter_dims must be specified"
+        
+        if conv_dims is None:
+            conv_dims = filter_dims[1:]
+
+        if filter_dims is None:
+            if isinstance(conv_dims, int):
+                filter_dims = [input_dims[0], conv_dims, conv_dims, input_dims[3]]
+            elif isinstance(conv_dims, list):
+                if len(conv_dims) == 1:
+                    filter_dims = [input_dims[0], conv_dims[0], conv_dims[0], input_dims[3]]
+                elif len(conv_dims) == 2:
+                    filter_dims = [input_dims[0], conv_dims[0], conv_dims[1], input_dims[3]]
+                elif len(conv_dims) == 3:
+                    filter_dims = [input_dims[0], conv_dims[0], conv_dims[1], conv_dims[2]]
+                else:
+                    raise ValueError('conv_width must be int or list of length 1, 2, or 3.')
 
         super(ConvLayer, self).__init__(input_dims,
             num_filters,
@@ -373,12 +396,25 @@ class DivNormLayer(NDNLayer):
 
     """ 
 
-    def __init__(self, input_dims,
+    def __init__(self,
+            input_dims=None,
+            num_filters=None,
+            filter_dims=None,
+            pos_constraint=True,
             **kwargs,
         ):
 
-        num_filters = input_dims[0]
+        assert (input_dims is not None) or (num_filters is not None), "DivNormLayer: Must specify either input_dims or num_filters"
         
+        if not pos_constraint:
+            pos_constraint = True
+
+        if num_filters is None:            
+            num_filters = input_dims[0]
+
+        if input_dims is None:
+            input_dims = [num_filters, 1, 1, 1] # assume non-convolutional
+
         # number of filters (and size of filters) is set by channel dims on the input
         
         filter_dims = [num_filters, 1, 1, 1]
@@ -386,7 +422,7 @@ class DivNormLayer(NDNLayer):
         super(DivNormLayer, self).__init__(input_dims,
             num_filters,
             filter_dims=filter_dims,
-            pos_constraint=True, **kwargs)
+            pos_constraint=pos_constraint, **kwargs)
 
         self.output_dims = self.input_dims
         self.num_outputs = np.prod(self.output_dims)
@@ -430,8 +466,8 @@ class DivNormLayer(NDNLayer):
 class ReadoutLayer(NDNLayer):
 
     def __init__(self, 
-            input_dims,
-            num_filters,
+            input_dims=None,
+            num_filters=None,
             filter_dims=None, 
             batch_sample=True,
             init_mu_range=0.1,
@@ -439,6 +475,9 @@ class ReadoutLayer(NDNLayer):
             gauss_type: str='uncorrelated', # 'isotropic', 'uncorrelated', or 'full'
             align_corners=False,
             **kwargs):
+
+        assert input_dims is not None, "ReadoutLayer: Must specify input_dims"
+        assert num_filters is not None, "ReadoutLayer: Must specify num_filters"
 
         # Make sure filter_dims is filled in, and to single the spatial filter dimensions
         if filter_dims is None:
@@ -665,17 +704,22 @@ class STconvLayer(ConvLayer):
     """ 
 
     def __init__(self,
-        input_dims, # [C, W, H, T]
-        num_filters, # int
-        conv_dims, # [w,h,t]
+        input_dims=None, # [C, W, H, T]
+        num_filters=None, # int
+        conv_dims=None, # [w,h,t]
+        filter_dims=None, # [C, w, h, t]
         temporal_tent_spacing=None,
         stride=1,
         dilation=1,
         **kwargs):
         
-        """Note that passed in stimulus should not be time-expanded, but input-dimensions should have desired lag"""
-        print(kwargs.keys())
+        assert input_dims is not None, "STConvLayer: input_dims must be specified"
+        assert num_filters is not None, "STConvLayer: num_filters must be specified"
+        assert (conv_dims is not None) or (filter_dims is not None), "STConvLayer: conv_dims or filter_dims must be specified"
         
+        if conv_dims is None:
+            conv_dims = filter_dims[1:]
+
         # If tent-basis, figure out how many lag-dimensions using tent_basis transform
         tent_basis = None
         if temporal_tent_spacing is not None:
@@ -686,12 +730,17 @@ class STconvLayer(ConvLayer):
             print('STconv: num_lag_params =', num_lag_params)
             conv_dims[2] = num_lag_params
 
+        if filter_dims is None:
+            filter_dims = [input_dims[0]] + conv_dims
+        else:            
+            filter_dims[1:] = conv_dims
+
         assert stride == 1, 'Cannot handle greater strides than 1.'
         assert dilation == 1, 'Cannot handle greater dilations than 1.'
 
         # All parameters of filter (weights) should be correctly fit in layer_params
         super(STconvLayer, self).__init__(input_dims,
-            num_filters, conv_dims, stride, dilation, **kwargs)
+            num_filters, conv_dims, stride=stride, dilation=dilation, **kwargs)
 
         self.num_lags = self.input_dims[3]
         self.input_dims[3] = 1  # take lag info and use for temporal convolution

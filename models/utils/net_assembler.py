@@ -20,10 +20,10 @@ def assemble_ffnetworks(ffnet_list, external_nets=None):
     When multiple ffnet inputs are concatenated, it will always happen in the first
     (filter) dimension, so all other dimensions must match
     """
-    assert type(ffnet_list) is list, "Yo ffnet_list is screwy."
+    assert type(ffnet_list) is list, "ffnet_list must be a list."
     
     num_networks = len(ffnet_list)
-    # Make list of lightning modules
+    # Make list of pytorch modules
     networks = nn.ModuleList()
 
     for mm in range(num_networks):
@@ -42,6 +42,6 @@ def assemble_ffnetworks(ffnet_list, external_nets=None):
         if net_type == 'external':  # separate case because needs to pass in external modules directly
             networks.append( networks.FFnet_external(ffnet_list[mm], external_nets))
         else:
-            networks.append( FFnets[net_type](ffnet_list[mm]) )
+            networks.append( FFnets[net_type](**ffnet_list[mm]) )
 
     return networks

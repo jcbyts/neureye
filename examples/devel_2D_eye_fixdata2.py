@@ -31,22 +31,6 @@ import matplotlib.pyplot as plt  # plotting
 # the dataset
 import datasets.mitchell.pixel as datasets
 
-import neureye.models.layers as layers
-
-
-#%%
-
-
-# %%
-# import neureye.models.readouts as readouts
-# import neureye.models.regularizers as regularizers
-# import neureye.models.utils as ut
-
-# device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-# dtype = torch.float32
-
-# # Where saved models and checkpoints go -- this is to be automated
-# print( 'Save_dir =', dirname)
 
 #%% Fixation dataset
 sess_list = ['20200304'] # multiple datasets can be loaded
@@ -65,44 +49,117 @@ train_ds = datasets.FixationMultiDataset(sess_list, datadir,
     add_noise=5,
     verbose=False)
 
-# test_ds = datasets.FixationMultiDataset(sess_list, datadir,
-#     requested_stims=['Gabor'],
-#     num_lags_pre_sac=10,
-#     stimset='Test',
-#     downsample_t=downsample_t,
-#     max_fix_length=2000,
-#     saccade_basis={'max_len': 40, 'num':15},
-#     num_lags = num_lags)
 #%%
-import importlib
-importlib.reload(layers.layers)
-importlib.reload(layers)
+data = train_ds[0]
 
-#%%
+#%% IMPORT
 
 
-
-#%%
-
+import neureye.models.NDN as NDN
 import torch.nn as nn
-# import neureye.models.layers.layers as layers
-class MyModel(nn.Module):
+import neureye.models.utils.param_dicts as Dicts
+import neureye.models.layers as layers
+import neureye.models.utils as utils
+
+#%% Old way
+
+input_dims = train_ds.dims + [train_ds.num_lags] # [C, H, W, T]
+NC = train_ds.NC
+
+num_subunits = 16
+d2xt = 0.01
+center = 0.01
+
+
+core_par = Dicts.ffnet_dict_NIM(
+        input_dims = input_dims, layer_sizes = [num_subunits, num_subunits], 
+        layer_types=['stconv', 'divnorm'],
+        norm_list=[0, 0],
+        conv_widths=[19, 1], act_funcs = ['elu', 'relu'],
+        reg_list={'d2xt':[d2xt], 'center':[center]})
+    
+core_par['layer_list'][0]['bias'] = False
+core_par['temporal_tent_spacing'] = 2
+core_par['layer_list'][1]['weights_initializer'] = 'xavier'
+
+            
+shifter_par = Dicts.ffnet_dict_NIM(
+    xstim_n='eyepos',
+    input_dims = [2, 1, 1, 1], layer_sizes = [30, 2],
+    layer_types=['normal', 'normal'],
+    act_funcs = ['elu', 'lin'])
+
+readout_par = Dicts.ffnet_dict_readout(ffnet_n=[0,1], num_cells=NC,
+        reg_list={'l2':[0.001]})
+    
+
+model_name = 'cr2'
+idtag = NBname + '/' + model_name # what to call these data
+print(idtag)
+
+# opt_pars = utils.create_optimizer_params(
+#         learning_rate=lr, early_stopping_patience=4,
+#         weight_decay = wd) # high initial learning rate because we decay on plateau)
+
+#     opt_pars['optimizer'] = 'AdamW'
+#     opt_pars['batch_size'] = 10 # number of fixations
+#     opt_pars['optimize_graph'] = False
+#     opt_pars['num_workers'] = NUM_WORKERS
+
+#%%
+cr0 = NDN.NDN( ffnet_list= [core_par, shifter_par, readout_par],
+        model_name=idtag,
+        data_dir=dirname)
+
+
+
+
+#%%
+data = train_ds[0]
+
+yhat = cr0(data)
+
+print(yhat.shape)
+
+#%%
+out = cr0.training_step(data)
+
+#%% WAY 1: looks like a pytorch model
+class STConvShifterModel(NDN.NDN):
 
     def __init__(self, input_dims, num_filters, filter_dims, num_outputs):
 
-        super(MyModel, self).__init__()
+        super(STConvShifterModel, self).__init__()
+        self.networks = nn.ModuleList()
 
-        self.layer1 = layers.STconvLayer(input_dims, num_filters,
+        # FFNET 1: ST Conv layer with divisive normalization on output    
+        layer0 = layers.STconvLayer(input_dims, num_filters,
                 filter_dims, NLtype='elu', norm_type=1, reg_vals={'d2xt':0.01, 'l1':0.01})
+        layer1 = layers.DivNormLayer(self.layer0.output_dims)
+        
+        ffnet1 = layers.network(xstim_n='stim', layers=nn.ModuleList([layer0, layer1]))
+        self.networks.append(ffnet1)
+
+        # FFNET 2: Shifter Network
+        layer0 = layers.NDNLayer(input_dims=2, num_filters=20, NLtype='elu')
+        layer1 = layers.NDNLayer(input_dims=layer0.output_dims, num_filters=2, NLtype='elu', bias=True)
+        ffnet2 = layers.network(xstim_n='eyepos', layers=nn.ModuleList([layer0, layer1]))
+        self.networks.append(ffnet2)
+
+
         self.layer2 = layers.DivNormLayer(self.layer1.output_dims)
         self.readout = layers.ReadoutLayer(self.layer2.output_dims, num_outputs)
-    
-    def forward(self, x):
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.readout(x)
+        # ffnet3 = layers.network(xstim_n = None, ffnet)
 
-        return x
+#%%
+input_dims = train_ds.dims + [train_ds.num_lags] # [C, H, W, T]
+NC = train_ds.NC
+num_subunits = 16
+cr0 = STConvShifterModel(input_dims=input_dims, num_filters=20, filter_dims=[5,5], num_outputs=NC)
+
+#%%
+layer = layers.STconvLayer(input_dims, 10, [15,15,train_ds.num_lags])
+
 
 
 #%%
@@ -113,13 +170,6 @@ filter_dims = [19, 19, train_ds.num_lags]
 num_outputs = 35
 
 shifter = MyModel(input_dims, num_filters, filter_dims, num_outputs)
-
-#%%
-data = train_ds[0]
-
-yhat = shifter(data['stim'])
-
-print(yhat.shape)
 
 #%% Load Gabor / Dots data to check STAS
 data = train_ds[train_ds.get_stim_indices(['Gabor', 'Dots'])]
