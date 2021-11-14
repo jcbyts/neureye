@@ -2,7 +2,6 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-import neureye.models.layers as layers
 import neureye.models.losses as losses
 from neureye.models.utils import save_hyperparameters, assemble_ffnetworks
 
