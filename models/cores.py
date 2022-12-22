@@ -1,6 +1,6 @@
 import warnings
 import numpy as np
-from collections import OrderedDict, Iterable
+from collections import OrderedDict
 
 import torch
 from torch import nn
@@ -273,20 +273,6 @@ class Stacked2dDivNorm(Stacked2dCore):
 
         # save hyperparameters manually for logging (PL did this all fancy like)
         self.hparams = save_hyperparameters()
-        # self.hparams.input_channels = input_channels
-        # self.hparams.hidden_channels = hidden_channels
-        # self.hparams.input_kern = input_kern
-        # self.hparams.hidden_kern = hidden_kern
-        # self.hparams.activation = activation
-        # self.hparams.final_nonlinearity = final_nonlinearity
-        # self.hparams.bias = bias
-        # self.hparams.pad_input = pad_input
-        # self.hparams.hidden_padding = hidden_padding
-        # self.hparams.group_norm = group_norm
-        # self.hparams.num_groups = num_groups
-        # self.hparams.weight_norm = weight_norm
-        # self.hparams.hidden_dilation = hidden_dilation
-
 
         super().__init__(input_channels,hidden_channels,input_kern,hidden_kern,**kwargs)
 
@@ -323,7 +309,7 @@ class Stacked2dDivNorm(Stacked2dCore):
         self.features.add_module("layer0", nn.Sequential(layer))
 
         # --- other layers
-        if not isinstance(hidden_kern, Iterable):
+        if isinstance(hidden_kern, int):
             hidden_kern = [hidden_kern] * (self.layers - 1)
 
         for l in range(1, self.layers):

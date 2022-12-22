@@ -27,84 +27,6 @@ def save_hyperparameters():
 
     return hparams
 
-def get_trainer(dataset,
-        version=1,
-        save_dir='./checkpoints',
-        name='jnkname',
-        auto_lr=False,
-        batchsize=1000,
-        earlystopping=True,
-        earlystoppingpatience=10,
-        max_epochs=150,
-        num_workers=1,
-        gradient_clip_val=0,
-        seed=None):
-    """
-    Returns a pytorch lightning trainer and splits the training set into "train" and "valid"
-    """
-    from torch.utils.data import Dataset, DataLoader, random_split
-    from pathlib import Path
-
-    
-    save_dir = Path(save_dir)
-    n_val = np.floor(len(dataset)/5).astype(int)
-    n_train = (len(dataset)-n_val).astype(int)
-
-    gd_train, gd_val = random_split(dataset, lengths=[n_train, n_val])
-
-    # build dataloaders
-    train_dl = DataLoader(gd_train, batch_size=batchsize, num_workers=num_workers, pin_memory=True)
-    valid_dl = DataLoader(gd_val, batch_size=batchsize, num_workers=num_workers, pin_memory=True)
-
-    # Train
-    if earlystopping:
-        early_stop_callback = EarlyStopping(monitor='val_loss', min_delta=0.0, patience=earlystoppingpatience)
-    # checkpoint_callback = ModelCheckpoint(monitor='val_loss')
-
-    # logger = TestTubeLogger(
-    #     save_dir=save_dir,
-    #     name=name,
-    #     version=version  # fixed to one to ensure checkpoint load
-    # )
-    if earlystopping:
-        trainer = Trainer(gpus=1, progress_bar_refresh_rate=20,
-            default_root_dir=save_dir,
-            max_epochs=max_epochs,
-            callbacks=[early_stop_callback],
-            auto_lr_find=auto_lr)
-    else:
-        trainer = Trainer(gpus=1, progress_bar_refresh_rate=20,
-            default_root_dir=save_dir,
-            max_epochs=max_epochs,
-            auto_lr_find=auto_lr)
-
-    # # ckpt_folder = save_dir / sessid / 'version_{}'.format(version) / 'checkpoints'
-    # if earlystopping:
-    #     trainer = Trainer(gpus=1, callbacks=[early_stop_callback],
-    #         checkpoint_callback=checkpoint_callback,
-    #         logger=logger,
-    #         deterministic=False,
-    #         gradient_clip_val=gradient_clip_val,
-    #         accumulate_grad_batches=1,
-    #         progress_bar_refresh_rate=20,
-    #         max_epochs=1000,
-    #         auto_lr_find=auto_lr)
-    # else:
-    #     trainer = Trainer(gpus=1,
-    #         checkpoint_callback=checkpoint_callback,
-    #         logger=logger,
-    #         deterministic=False,
-    #         gradient_clip_val=gradient_clip_val,
-    #         accumulate_grad_batches=1,
-    #         progress_bar_refresh_rate=20,
-    #         max_epochs=max_epochs,
-    #         auto_lr_find=auto_lr)
-
-    if seed:
-        seed_everything(seed)
-
-    return trainer, train_dl, valid_dl
-
 def get_fit_versions(save_path):
     '''
         Find versions of the fit model
@@ -142,7 +64,7 @@ def get_fit_versions(save_path):
             ea.Reload()
             try:
                 val = np.asarray([x.value for x in ea.scalars.Items("Loss/Validation (Epoch)")])
-                bestval = np.min(val)
+                bestval = np.nanmin(val)
 
                 outdict['version_num'].append(v)
                 outdict['events_file'].append(evfile)
@@ -193,7 +115,7 @@ def get_null_adjusted_ll(model, sample, bits=False):
     m0 = model.cpu()
     loss = torch.nn.PoissonNLLLoss(log_input=False, reduction='none')
     lnull = -loss(torch.ones(sample['robs'].shape)*sample['robs'].mean(axis=0), sample['robs']).detach().cpu().numpy().sum(axis=0)
-    yhat = m0(sample['stim'], shifter=sample['eyepos'])
+    yhat = m0(sample['stim'], shifter=sample['eyepos'], sample=sample)
     llneuron = -loss(yhat,sample['robs']).detach().cpu().numpy().sum(axis=0)
     rbar = sample['robs'].sum(axis=0).numpy()
     ll = (llneuron - lnull)/rbar
